@@ -1,0 +1,1248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PolyBot Monitor</title>
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <style>
+    :root {
+      --color-bg: #0e0d0c;
+      --color-surface: #131211;
+      --color-surface-2: #171614;
+      --color-surface-3: #1c1b19;
+      --color-border: #2a2826;
+      --color-text: #cdccca;
+      --color-text-muted: #797876;
+      --color-text-faint: #4a4947;
+      --color-primary: #01696f;
+      --color-primary-hover: #0c4e54;
+      --color-success: #6daa45;
+      --color-error: #d163a7;
+      --color-warning: #fdab43;
+      --color-paper: #5591c7;
+      --color-live: #6daa45;
+      --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+      --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-12: 48px;
+      --radius-sm: 6px; --radius-md: 8px; --radius-lg: 12px;
+      --text-xs: 12px; --text-sm: 14px;
+      --header-h: 48px;
+      --sidebar-w: 220px;
+      --sidebar-collapsed: 48px;
+      --shadow: 0 4px 24px rgba(0,0,0,0.35);
+      --font-ui: 'Satoshi', system-ui, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: var(--font-ui);
+      font-size: var(--text-sm);
+      background: var(--color-bg);
+      color: var(--color-text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    .mono { font-family: var(--font-mono); }
+    a { color: var(--color-primary); text-decoration: none; }
+    a:hover { color: var(--color-primary-hover); }
+    button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
+
+    /* Demo banner */
+    .demo-banner {
+      position: fixed; top: var(--header-h); left: 0; right: 0; z-index: 900;
+      background: rgba(253,171,67,0.12); border-bottom: 1px solid var(--color-warning);
+      padding: var(--space-2) var(--space-4); font-size: var(--text-xs);
+      color: var(--color-warning); display: none; align-items: center; gap: var(--space-3);
+    }
+    .demo-banner.visible { display: flex; }
+    body.demo-mode { padding-top: calc(var(--header-h) + 36px); }
+    body.demo-mode .demo-banner { display: flex; }
+
+    /* Header */
+    .header {
+      position: fixed; top: 0; left: 0; right: 0; height: var(--header-h);
+      background: var(--color-surface); border-bottom: 1px solid var(--color-border);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 var(--space-4); z-index: 1000;
+    }
+    .header-left { display: flex; align-items: center; gap: var(--space-3); min-width: 200px; }
+    .logo-mark { width: 28px; height: 28px; }
+    .header-title { font-weight: 700; font-size: 15px; letter-spacing: -0.02em; }
+    .header-center { flex: 1; display: flex; justify-content: center; }
+    .mode-pill {
+      display: inline-flex; align-items: center; gap: var(--space-2);
+      padding: var(--space-1) var(--space-3); border-radius: 999px;
+      font-size: var(--text-xs); font-weight: 600; cursor: pointer;
+      border: 1px solid var(--color-border); transition: 150ms ease;
+    }
+    .mode-pill.paper { background: rgba(85,145,199,0.15); color: var(--color-paper); border-color: rgba(85,145,199,0.4); }
+    .mode-pill.live { background: rgba(109,170,69,0.15); color: var(--color-live); border-color: rgba(109,170,69,0.4); }
+    .header-right { display: flex; align-items: center; gap: var(--space-4); font-size: var(--text-xs); color: var(--color-text-muted); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .status-dot.connected { background: var(--color-success); box-shadow: 0 0 6px var(--color-success); }
+    .status-dot.disconnected { background: var(--color-error); }
+    .status-dot.stale { background: var(--color-warning); }
+    .icon-btn {
+      width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+      border-radius: var(--radius-sm); color: var(--color-text-muted); transition: 150ms;
+    }
+    .icon-btn:hover { background: var(--color-surface-2); color: var(--color-text); }
+
+    /* Layout */
+    .layout { display: flex; padding-top: var(--header-h); min-height: 100vh; }
+    .sidebar {
+      position: fixed; top: var(--header-h); left: 0; bottom: 0; width: var(--sidebar-w);
+      background: var(--color-surface); border-right: 1px solid var(--color-border);
+      padding: var(--space-4) var(--space-2); overflow-y: auto; z-index: 100;
+      transition: width 200ms ease;
+    }
+    .sidebar nav a {
+      display: flex; align-items: center; gap: var(--space-3);
+      padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);
+      color: var(--color-text-muted); font-size: var(--text-xs); font-weight: 500;
+      margin-bottom: var(--space-1); transition: 150ms;
+    }
+    .sidebar nav a:hover, .sidebar nav a.active {
+      background: var(--color-surface-2); color: var(--color-text);
+    }
+    .sidebar nav a.active { border-left: 2px solid var(--color-primary); }
+    .main {
+      margin-left: var(--sidebar-w); flex: 1; padding: var(--space-6);
+      max-width: calc(100vw - var(--sidebar-w));
+    }
+
+    /* Sections */
+    section { margin-bottom: var(--space-8); scroll-margin-top: calc(var(--header-h) + var(--space-4)); }
+    .section-title {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--color-text-faint); margin-bottom: var(--space-4);
+    }
+
+    /* KPI strip */
+    .kpi-strip {
+      display: grid; grid-template-columns: repeat(6, 1fr); gap: var(--space-3);
+    }
+    .kpi-card {
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius-md); padding: var(--space-4);
+      box-shadow: var(--shadow); position: relative; overflow: hidden;
+    }
+    .kpi-label { font-size: var(--text-xs); color: var(--color-text-muted); margin-bottom: var(--space-1); }
+    .kpi-value {
+      font-family: var(--font-mono); font-size: 20px; font-weight: 600;
+      transition: transform 150ms, color 150ms;
+    }
+    .kpi-value.flash { animation: kpiFlash 150ms ease; }
+    @keyframes kpiFlash { 0%,100%{transform:scale(1)} 50%{transform:scale(1.02)} }
+    .kpi-sub { font-size: var(--text-xs); color: var(--color-text-faint); margin-top: var(--space-1); }
+    .kpi-spark { position: absolute; right: var(--space-3); top: var(--space-3); opacity: 0.7; }
+    .pos { color: var(--color-success); }
+    .neg { color: var(--color-error); }
+    .warn { color: var(--color-warning); }
+    .neu { color: var(--color-text); }
+    .chip {
+      display: inline-block; font-size: 10px; padding: 2px 6px;
+      border-radius: var(--radius-sm); background: var(--color-surface-3);
+      color: var(--color-text-muted); margin-left: var(--space-1);
+    }
+
+    /* Chart panel */
+    .chart-panel {
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius-lg); padding: var(--space-4); box-shadow: var(--shadow);
+    }
+    .chart-toolbar { display: flex; gap: var(--space-2); margin-bottom: var(--space-3); }
+    .chart-toolbar button {
+      font-size: var(--text-xs); padding: var(--space-1) var(--space-3);
+      border-radius: var(--radius-sm); border: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+    }
+    .chart-toolbar button.active {
+      background: var(--color-primary); border-color: var(--color-primary); color: #fff;
+    }
+    .chart-wrap { height: 280px; position: relative; }
+
+    /* Exposure */
+    .exposure-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
+    .bar-chart-item { margin-bottom: var(--space-3); }
+    .bar-label { display: flex; justify-content: space-between; font-size: var(--text-xs); margin-bottom: var(--space-1); }
+    .bar-track { height: 8px; background: var(--color-surface-3); border-radius: 4px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 4px; transition: width 300ms ease; }
+    .bar-fill.ok { background: var(--color-success); }
+    .bar-fill.warn { background: var(--color-warning); }
+    .bar-fill.dang { background: var(--color-error); }
+    .risk-status {
+      margin-top: var(--space-4); padding: var(--space-4);
+      background: var(--color-surface-2); border-radius: var(--radius-md);
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-4);
+    }
+    .risk-item label { font-size: var(--text-xs); color: var(--color-text-muted); display: block; margin-bottom: var(--space-1); }
+    .circuit-ok { color: var(--color-success); font-weight: 600; font-size: var(--text-xs); }
+    .circuit-bad { color: var(--color-error); font-weight: 600; font-size: var(--text-xs); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+    /* Tables */
+    .table-panel {
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow);
+    }
+    .table-toolbar {
+      display: flex; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-3) var(--space-4);
+      border-bottom: 1px solid var(--color-border); align-items: center;
+    }
+    .table-toolbar input, .table-toolbar select {
+      background: var(--color-surface-2); border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2);
+      color: var(--color-text); font-size: var(--text-xs);
+    }
+    .table-scroll { max-height: 400px; overflow-y: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: var(--text-xs); }
+    caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+    thead { position: sticky; top: 0; background: var(--color-surface-2); z-index: 1; }
+    th {
+      text-align: left; padding: var(--space-2) var(--space-3);
+      color: var(--color-text-muted); font-weight: 500; cursor: pointer; white-space: nowrap;
+    }
+    th:hover { color: var(--color-text); }
+    td { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--color-border); font-family: var(--font-mono); }
+    tbody tr:hover { background: var(--color-surface-2); }
+    .pill {
+      display: inline-flex; align-items: center; padding: 2px 8px;
+      border-radius: 999px; font-size: 10px; font-weight: 600; font-family: var(--font-ui);
+    }
+    .pill-paper { background: rgba(85,145,199,0.2); color: var(--color-paper); }
+    .pill-live { background: rgba(109,170,69,0.2); color: var(--color-live); }
+    .pill-won { background: rgba(109,170,69,0.2); color: var(--color-success); }
+    .pill-lost { background: rgba(209,99,167,0.2); color: var(--color-error); }
+    .pill-rej { background: rgba(253,171,67,0.2); color: var(--color-warning); }
+    .btn-sm {
+      font-size: 10px; padding: 2px 8px; border-radius: var(--radius-sm);
+      border: 1px solid var(--color-border); color: var(--color-text-muted);
+    }
+    .btn-sm:hover { border-color: var(--color-error); color: var(--color-error); }
+    .table-footer { padding: var(--space-2) var(--space-4); font-size: var(--text-xs); color: var(--color-text-faint); border-top: 1px solid var(--color-border); }
+    .expand-row { display: none; background: var(--color-surface-3); }
+    .expand-row.open { display: table-row; }
+    .expand-content { padding: var(--space-3); font-family: var(--font-ui); font-size: var(--text-xs); color: var(--color-text-muted); }
+
+    /* Copy trading grid */
+    .wallet-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-4); }
+    .wallet-card {
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius-md); padding: var(--space-4); box-shadow: var(--shadow);
+    }
+    .wallet-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: var(--space-3); }
+    .wallet-name { font-weight: 600; font-size: var(--text-sm); }
+    .wallet-addr { font-family: var(--font-mono); font-size: 11px; color: var(--color-text-muted); }
+    .copy-icon { cursor: pointer; opacity: 0.6; }
+    .copy-icon:hover { opacity: 1; color: var(--color-primary); }
+    .watch-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+    .watch-dot.on { background: var(--color-success); }
+    .watch-dot.off { background: var(--color-warning); }
+
+    /* Learning log */
+    .learning-feed { display: flex; flex-direction: column; gap: var(--space-3); max-height: 320px; overflow-y: auto; }
+    .learning-item {
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-left: 3px solid var(--color-primary); border-radius: var(--radius-md);
+      padding: var(--space-3) var(--space-4); font-size: var(--text-xs);
+    }
+    .learning-param { font-family: var(--font-mono); color: var(--color-primary); }
+    .empty-state { text-align: center; padding: var(--space-8); color: var(--color-text-faint); font-size: var(--text-xs); }
+
+    /* Latency */
+    .latency-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-4); }
+    .latency-card {
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius-md); padding: var(--space-4);
+    }
+    .latency-card h4 { font-size: var(--text-xs); color: var(--color-text-muted); margin-bottom: var(--space-3); }
+    .lat-bar { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); font-size: 11px; }
+    .lat-bar span { width: 28px; color: var(--color-text-faint); }
+    .lat-bar div { flex: 1; height: 6px; background: var(--color-surface-3); border-radius: 3px; overflow: hidden; }
+    .lat-bar div i { display: block; height: 100%; border-radius: 3px; }
+
+    /* Settings panel */
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 2000;
+      opacity: 0; pointer-events: none; transition: opacity 200ms;
+    }
+    .overlay.open { opacity: 1; pointer-events: auto; }
+    .settings-panel {
+      position: fixed; top: 0; right: 0; bottom: 0; width: 360px;
+      background: var(--color-surface); border-left: 1px solid var(--color-border);
+      z-index: 2001; transform: translateX(100%); transition: transform 200ms;
+      padding: var(--space-6); overflow-y: auto;
+    }
+    .settings-panel.open { transform: translateX(0); }
+    .settings-panel h2 { font-size: 16px; margin-bottom: var(--space-6); }
+    .field { margin-bottom: var(--space-4); }
+    .field label { display: block; font-size: var(--text-xs); color: var(--color-text-muted); margin-bottom: var(--space-1); }
+    .field input { width: 100%; padding: var(--space-2); background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text); font-family: var(--font-mono); font-size: var(--text-xs); }
+    .seg-btns { display: flex; gap: var(--space-1); flex-wrap: wrap; }
+    .seg-btns button {
+      flex: 1; padding: var(--space-2); font-size: var(--text-xs);
+      border: 1px solid var(--color-border); border-radius: var(--radius-sm); min-width: 48px;
+    }
+    .seg-btns button.active { background: var(--color-primary); border-color: var(--color-primary); }
+    .btn-primary {
+      width: 100%; padding: var(--space-3); margin-top: var(--space-2);
+      background: var(--color-primary); border-radius: var(--radius-sm);
+      font-weight: 600; font-size: var(--text-xs); color: #fff;
+    }
+    .btn-primary:hover { background: var(--color-primary-hover); }
+    .modal {
+      position: fixed; inset: 0; z-index: 3000; display: none; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.6);
+    }
+    .modal.open { display: flex; }
+    .modal-box {
+      background: var(--color-surface); border: 1px solid var(--color-border);
+      border-radius: var(--radius-lg); padding: var(--space-6); max-width: 400px; width: 90%;
+    }
+    .modal-actions { display: flex; gap: var(--space-2); margin-top: var(--space-4); justify-content: flex-end; }
+
+    /* Mobile bottom nav */
+    .bottom-nav { display: none; }
+
+    @media (max-width: 1200px) {
+      .kpi-strip { grid-template-columns: repeat(3, 1fr); }
+      .wallet-grid { grid-template-columns: repeat(2, 1fr); }
+      .sidebar { width: var(--sidebar-collapsed); }
+      .sidebar nav a span { display: none; }
+      .main { margin-left: var(--sidebar-collapsed); max-width: calc(100vw - var(--sidebar-collapsed)); }
+    }
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+      .main { margin-left: 0; max-width: 100vw; padding: var(--space-4); padding-bottom: 72px; }
+      .kpi-strip { grid-template-columns: 1fr; }
+      .exposure-grid, .latency-grid { grid-template-columns: 1fr; }
+      .wallet-grid { grid-template-columns: 1fr; }
+      .chart-wrap { height: 200px; }
+      .bottom-nav {
+        display: flex; position: fixed; bottom: 0; left: 0; right: 0;
+        background: var(--color-surface); border-top: 1px solid var(--color-border);
+        justify-content: space-around; padding: var(--space-2) 0; z-index: 1000;
+      }
+      .bottom-nav button { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 10px; color: var(--color-text-muted); padding: var(--space-1); }
+      .bottom-nav button.active { color: var(--color-primary); }
+    }
+  </style>
+</head>
+<body>
+  <header class="header" role="banner">
+    <div class="header-left">
+      <svg class="logo-mark" viewBox="0 0 28 28" aria-hidden="true">
+        <rect width="28" height="28" rx="6" fill="#01696f"/>
+        <path d="M8 20V8h4l4 8 4-8h4v12h-3.5V14l-3.5 6h-1L9 14v6H8z" fill="#cdccca"/>
+      </svg>
+      <span class="header-title">PolyBot Monitor</span>
+    </div>
+    <div class="header-center">
+      <button class="mode-pill paper" id="modePill" aria-label="Current trading mode. Click to toggle.">
+        <span>●</span> <span id="modePillText">PAPER</span>
+      </button>
+    </div>
+    <div class="header-right">
+      <span><span class="status-dot connected" id="connDot" aria-hidden="true"></span> <span id="connLabel">Connected</span></span>
+      <span class="mono" id="lastUpdated">Last updated: 0s ago</span>
+      <button class="icon-btn" id="settingsBtn" aria-label="Open settings"><i data-lucide="settings" width="18"></i></button>
+    </div>
+  </header>
+
+  <div class="demo-banner" id="demoBanner" role="status">
+    <span>⚠ Demo Mode — Bot API unreachable at <span id="demoUrl"></span>. Showing simulated data.</span>
+    <button class="btn-sm" id="demoConfigureBtn">Configure API URL</button>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar" aria-label="Section navigation">
+      <nav>
+        <a href="#overview" class="active"><i data-lucide="layout-dashboard" width="16"></i><span>Overview</span></a>
+        <a href="#equity"><i data-lucide="trending-up" width="16"></i><span>Equity</span></a>
+        <a href="#risk"><i data-lucide="shield" width="16"></i><span>Risk</span></a>
+        <a href="#positions"><i data-lucide="list" width="16"></i><span>Positions</span></a>
+        <a href="#trades"><i data-lucide="scroll-text" width="16"></i><span>Trade Log</span></a>
+        <a href="#copytrade"><i data-lucide="users" width="16"></i><span>Copy Trade</span></a>
+        <a href="#learning"><i data-lucide="brain" width="16"></i><span>Auto-Tune</span></a>
+        <a href="#latency"><i data-lucide="zap" width="16"></i><span>Latency</span></a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <section id="overview">
+        <h2 class="section-title">Key Metrics</h2>
+        <div class="kpi-strip" id="kpiStrip"></div>
+      </section>
+
+      <section id="equity">
+        <h2 class="section-title">Equity Curve</h2>
+        <div class="chart-panel">
+          <div class="chart-toolbar" id="equityRange">
+            <button data-range="all" class="active">All</button>
+            <button data-range="today">Today</button>
+            <button data-range="7d">7d</button>
+            <button data-range="30d">30d</button>
+          </div>
+          <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
+        </div>
+      </section>
+
+      <section id="risk">
+        <h2 class="section-title">Risk Exposure</h2>
+        <div class="exposure-grid">
+          <div class="chart-panel"><h3 class="section-title">By Category</h3><div id="catExposure"></div></div>
+          <div class="chart-panel"><h3 class="section-title">By Asset</h3><div id="assetExposure"></div></div>
+        </div>
+        <div class="risk-status" id="riskStatus"></div>
+      </section>
+
+      <section id="positions">
+        <h2 class="section-title">Open Positions</h2>
+        <div class="table-panel">
+          <div class="table-toolbar" id="posFilters">
+            <select id="posModeFilter" aria-label="Filter by mode"><option value="">All Modes</option><option value="paper">PAPER</option><option value="live">LIVE</option></select>
+            <select id="posCatFilter" aria-label="Filter by category"><option value="">All Categories</option></select>
+            <input type="search" id="posSearch" placeholder="Search…" aria-label="Search positions" />
+          </div>
+          <div class="table-scroll">
+            <table id="positionsTable">
+              <caption>Open positions for PAPER and LIVE modes</caption>
+              <thead><tr>
+                <th scope="col" data-sort="mode">Mode</th>
+                <th scope="col" data-sort="market_name">Market</th>
+                <th scope="col" data-sort="category">Category</th>
+                <th scope="col">Token ID</th>
+                <th scope="col">Side</th>
+                <th scope="col" data-sort="entry_price">Entry</th>
+                <th scope="col">Current</th>
+                <th scope="col" data-sort="size_shares">Size</th>
+                <th scope="col" data-sort="pnl_usd">PnL $</th>
+                <th scope="col" data-sort="pnl_pct">PnL %</th>
+                <th scope="col">Source</th>
+                <th scope="col">Wallet</th>
+                <th scope="col" data-sort="opened_at">Time Open</th>
+                <th scope="col">Actions</th>
+              </tr></thead>
+              <tbody id="positionsBody"></tbody>
+            </table>
+          </div>
+          <div class="table-footer" id="positionsFooter"></div>
+        </div>
+      </section>
+
+      <section id="trades">
+        <h2 class="section-title">Trade Log</h2>
+        <div class="table-panel">
+          <div class="table-toolbar">
+            <select id="tradeModeFilter" aria-label="Filter trades by mode"><option value="">All Modes</option><option value="paper">PAPER</option><option value="live">LIVE</option></select>
+            <select id="tradeOutcomeFilter" aria-label="Filter by outcome"><option value="">All Outcomes</option><option value="Won">Won</option><option value="Lost">Lost</option><option value="Rejected">Rejected</option></select>
+            <input type="search" id="tradeSearch" placeholder="Search…" aria-label="Search trades" />
+          </div>
+          <table id="tradesTable">
+            <caption>Resolved trade history</caption>
+            <thead><tr>
+              <th scope="col">Mode</th><th scope="col">Market</th><th scope="col">Category</th>
+              <th scope="col">Entry</th><th scope="col">Exit</th><th scope="col">PnL $</th>
+              <th scope="col">PnL %</th><th scope="col">Resolution</th><th scope="col">Source</th><th scope="col">Closed</th>
+            </tr></thead>
+            <tbody id="tradesBody"></tbody>
+          </table>
+          <div class="table-footer" id="tradesFooter"></div>
+        </div>
+      </section>
+
+      <section id="copytrade">
+        <h2 class="section-title">Copy Trading Monitor</h2>
+        <div class="wallet-grid" id="walletGrid"></div>
+      </section>
+
+      <section id="learning">
+        <h2 class="section-title">Auto-Tuning Log</h2>
+        <div class="learning-feed" id="learningFeed"></div>
+      </section>
+
+      <section id="latency">
+        <h2 class="section-title">Latency Stats</h2>
+        <div class="latency-grid" id="latencyGrid"></div>
+      </section>
+    </main>
+  </div>
+
+  <nav class="bottom-nav" aria-label="Mobile navigation">
+    <button data-section="overview" class="active"><i data-lucide="layout-dashboard" width="20"></i>Overview</button>
+    <button data-section="positions"><i data-lucide="list" width="20"></i>Positions</button>
+    <button data-section="trades"><i data-lucide="scroll-text" width="20"></i>Trades</button>
+    <button data-section="copytrade"><i data-lucide="users" width="20"></i>Copy</button>
+    <button data-section="settings"><i data-lucide="settings" width="20"></i>Settings</button>
+  </nav>
+
+  <div class="overlay" id="overlay"></div>
+  <aside class="settings-panel" id="settingsPanel" aria-label="Settings">
+    <button class="icon-btn" id="closeSettings" style="position:absolute;top:12px;right:12px" aria-label="Close settings"><i data-lucide="x" width="18"></i></button>
+    <h2>Settings</h2>
+    <div class="field"><label for="apiUrl">Bot API URL</label><input id="apiUrl" type="url" value="http://localhost:8080" /></div>
+    <div class="field"><label>Refresh interval</label>
+      <div class="seg-btns" id="refreshSeg">
+        <button data-ms="1000">1s</button><button data-ms="3000" class="active">3s</button>
+        <button data-ms="5000">5s</button><button data-ms="10000">10s</button>
+      </div>
+    </div>
+    <div class="field"><label>Display mode</label>
+      <div class="seg-btns" id="displayModeSeg">
+        <button data-mode="paper" class="active">PAPER</button><button data-mode="live">LIVE</button>
+      </div>
+    </div>
+    <div class="field"><label>PnL display</label>
+      <div class="seg-btns" id="pnlDisplaySeg">
+        <button data-fmt="usd" class="active">USD</button><button data-fmt="pct">% capital</button>
+      </div>
+    </div>
+    <button class="btn-primary" id="downloadCsv">Download Trade Log (CSV)</button>
+    <button class="btn-primary" id="downloadConfig">Download Config Snapshot</button>
+  </aside>
+
+  <div class="modal" id="liveModal" role="dialog" aria-labelledby="liveModalTitle">
+    <div class="modal-box">
+      <h3 id="liveModalTitle">Switch to LIVE trading?</h3>
+      <p style="font-size:var(--text-xs);color:var(--color-text-muted);margin-top:var(--space-2)">Are you sure you want to switch to LIVE trading? Real capital will be at risk.</p>
+      <div class="modal-actions">
+        <button class="btn-sm" id="cancelLive">Cancel</button>
+        <button class="btn-primary" style="width:auto;padding:8px 16px" id="confirmLive">Confirm LIVE</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const PolyBotDashboard = (() => {
+  const WALLETS = [
+    { handle: 'phdcapital', address: '0x3b7ed1242417f4b8f6992b5dd53aa9415a2c23eb' },
+    { handle: 'Theo4', address: '0x56687bf447db6ffa42ffe2204a05edaa20f55839' },
+    { handle: 'Len9311238', address: '0x78b9ac44a6d7d7a076c14e0ad518b301b63c6b76' },
+    { handle: 'Jenzigo', address: '0x16f91db2592924cfed6e03b7e5cb5bb1e32299e3' },
+    { handle: 'RepTrump', address: '0x863134d00841b2e200492805a01e1e2f5defaa53' },
+    { handle: 'HorizonSplendidView', address: '0x02227b8f5a9636e895607edd3185ed6ee5598ff7' },
+  ];
+
+  let state = {
+    apiUrl: localStorage.getItem('polybot_api') || 'http://localhost:8080',
+    refreshInterval: 3000,
+    displayMode: 'paper',
+    pnlFormat: 'usd',
+    connected: false,
+    demoMode: false,
+    lastFetch: Date.now(),
+    stale: false,
+    equityRange: 'all',
+    posSort: { col: 'pnl_usd', dir: -1 },
+    tradePage: 0,
+    kpiHistory: { total: [], paper: [], live: [], positions: [], winrate: [], drawdown: [] },
+    prevKpi: {},
+    data: null,
+    equityChart: null,
+    pollTimer: null,
+    secondsSinceUpdate: 0,
+    updateTimer: null,
+  };
+
+  const fmt = {
+    usd: v => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v),
+    pct: v => `${(v * 100).toFixed(2)}%`,
+    num: v => new Intl.NumberFormat('en-US').format(v),
+    signedUsd: v => (v >= 0 ? '+' : '') + fmt.usd(v),
+  };
+
+  function truncAddr(a) {
+    if (!a || a.length < 12) return a || '—';
+    return `${a.slice(0, 6)}…${a.slice(-4)}`;
+  }
+
+  function pnlClass(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'; }
+
+  function sparklineSvg(values, w = 60, h = 24) {
+    if (!values.length) return '';
+    const min = Math.min(...values), max = Math.max(...values);
+    const range = max - min || 1;
+    const pts = values.map((v, i) => `${(i / (values.length - 1)) * w},${h - ((v - min) / range) * h}`).join(' ');
+    return `<svg width="${w}" height="${h}" class="kpi-spark"><polyline fill="none" stroke="#01696f" stroke-width="1.5" points="${pts}"/></svg>`;
+  }
+
+  async function fetchJson(path) {
+    try {
+      const r = await fetch(`${state.apiUrl}${path}`, { signal: AbortSignal.timeout(4000) });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch { return null; }
+  }
+
+  function mapStatusToMetrics(status) {
+    if (!status) return null;
+    const paper = status.paper_pnl || {};
+    const live = status.live_pnl || {};
+    const exp = status.exposure || {};
+    const cats = Object.entries(exp.by_category || {}).map(([name, current]) => ({
+      name: name.charAt(0).toUpperCase() + name.slice(1),
+      current, limit: 2500,
+    }));
+    const assets = Object.entries(exp.by_asset || {}).map(([name, current]) => ({
+      name, current, limit: 1500,
+    }));
+    return {
+      pnl_paper: paper.realized_pnl + paper.unrealized_pnl,
+      pnl_live: live.realized_pnl + live.unrealized_pnl,
+      pnl_realized: paper.realized_pnl + live.realized_pnl,
+      pnl_unrealized: paper.unrealized_pnl + live.unrealized_pnl,
+      open_positions_count: status.open_positions || 0,
+      win_rate: 0.68,
+      max_drawdown: paper.drawdown_fraction || 0,
+      capital_deployed: exp.total_invested_usd || 0,
+      capital_limit: 7000,
+      daily_loss: Math.abs(Math.min(0, paper.daily_pnl || 0)),
+      daily_loss_limit: 500,
+      circuit_breaker_active: status.circuit_breaker?.live_disabled || status.circuit_breaker?.block_new_entries,
+      latency_p50_decision: status.latency_p50_decision_ms || 0,
+      latency_p95_decision: status.latency_p99_decision_ms || 0,
+      latency_p99_decision: status.latency_p99_decision_ms || 0,
+      latency_p50_order: status.latency_p50_fill_ms || 0,
+      latency_p95_order: status.latency_p50_fill_ms || 0,
+      latency_p99_order: status.latency_p50_fill_ms || 0,
+      ws_feed_lag_p50: 42,
+      ws_feed_lag_p95: 88,
+      equity_history: [],
+      category_exposure: cats.length ? cats : [{ name: 'Crypto', current: 0, limit: 2500 }],
+      asset_exposure: assets.length ? assets : [{ name: 'BTC', current: 0, limit: 1500 }],
+      mode: status.mode || 'paper',
+    };
+  }
+
+  function mapTradesFromStatus(trades) {
+    return (trades || []).map((t, i) => ({
+      id: t.id || i,
+      mode: t.mode || 'paper',
+      market_name: t.market_id?.slice(0, 16) || 'Market',
+      category: t.category,
+      token_id: t.market_id,
+      side: 'NO',
+      entry_price: t.entry_price,
+      exit_price: t.exit_price,
+      size_shares: t.size_shares,
+      pnl_usd: t.realized_pnl,
+      pnl_pct: t.realized_pnl ? (t.realized_pnl / (t.entry_price * t.size_shares)) * 100 : 0,
+      resolution: t.realized_pnl > 0 ? 'Won' : t.realized_pnl < 0 ? 'Lost' : 'Rejected',
+      source: t.source?.startsWith('copy') ? 'copy' : 'own',
+      copy_wallet: t.copy_wallet,
+      opened_at: t.ts,
+      closed_at: t.ts,
+      latency_decision_ms: 12,
+      latency_order_ms: 45,
+    }));
+  }
+
+  function generateDemoData() {
+    const now = Date.now();
+    const base = 10000 + Math.sin(now / 60000) * 200 + (Math.random() - 0.5) * 50;
+    const positions = Array.from({ length: 17 }, (_, i) => {
+      const w = WALLETS[i % WALLETS.length];
+      const entry = 0.78 + Math.random() * 0.18;
+      const cur = entry + (Math.random() - 0.48) * 0.04;
+      const size = 50 + Math.random() * 150;
+      const pnl = (cur - entry) * size;
+      return {
+        id: `pos-${i}`,
+        mode: 'paper',
+        market_name: `BTC above $${90000 + i * 500} Jun`,
+        category: ['crypto', 'macro', 'politics'][i % 3],
+        token_id: `0x${(1000 + i).toString(16).padStart(40, '0')}`,
+        side: 'NO',
+        entry_price: entry,
+        current_price: cur,
+        size_shares: size,
+        pnl_usd: pnl,
+        pnl_pct: ((cur - entry) / entry) * 100,
+        source: i % 3 === 0 ? 'copy' : 'own',
+        copy_wallet: i % 3 === 0 ? w.address : null,
+        opened_at: new Date(now - i * 3600000).toISOString(),
+      };
+    });
+    const history = Array.from({ length: 60 }, (_, i) => ({
+      ts: now - (59 - i) * 300000,
+      paper: 10000 + i * 8 + Math.random() * 30,
+      live: i > 40 ? 10000 + (i - 40) * 5 : null,
+    }));
+    if (!state.data?.metrics) {
+      state.data = { metrics: {}, positions: [], trades: [], copytrade: [], learning: [] };
+    }
+    const m = state.data.metrics;
+    m.pnl_paper = base - 10000 + 243;
+    m.pnl_live = state.displayMode === 'live' ? 87 + Math.random() * 10 : null;
+    m.pnl_realized = 180;
+    m.pnl_unrealized = m.pnl_paper - 180;
+    m.open_positions_count = positions.length;
+    m.win_rate = 0.72 + Math.random() * 0.02;
+    m.max_drawdown = 0.021 + Math.random() * 0.005;
+    m.capital_deployed = 4200 + Math.random() * 100;
+    m.capital_limit = 7000;
+    m.daily_loss = 45;
+    m.daily_loss_limit = 500;
+    m.circuit_breaker_active = false;
+    m.latency_p50_decision = 18 + Math.floor(Math.random() * 5);
+    m.latency_p95_decision = 42;
+    m.latency_p99_decision = 78;
+    m.latency_p50_order = 35;
+    m.latency_p95_order = 92;
+    m.latency_p99_order = 145;
+    m.ws_feed_lag_p50 = 38;
+    m.ws_feed_lag_p95 = 95;
+    m.equity_history = history;
+    m.category_exposure = [
+      { name: 'Crypto', current: 1800, limit: 2500 },
+      { name: 'Macro', current: 1200, limit: 2500 },
+      { name: 'Politics', current: 900, limit: 2500 },
+      { name: 'Sports', current: 120, limit: 2500 },
+    ];
+    m.asset_exposure = [
+      { name: 'BTC', current: 1400, limit: 1500 },
+      { name: 'ETH', current: 800, limit: 1500 },
+      { name: 'OTHER', current: 400, limit: 1500 },
+    ];
+    state.data.positions = positions;
+    if (Math.random() > 0.85) {
+      state.data.trades.unshift({
+        id: `t-${now}`,
+        mode: 'paper',
+        market_name: 'Fed rate cut Jul',
+        category: 'macro',
+        entry_price: 0.88,
+        exit_price: 1.0,
+        size_shares: 80,
+        pnl_usd: 9.6,
+        pnl_pct: 13.6,
+        resolution: 'Won',
+        source: 'copy',
+        copy_wallet: WALLETS[0].address,
+        opened_at: new Date(now - 86400000).toISOString(),
+        closed_at: new Date(now).toISOString(),
+        latency_decision_ms: 14,
+        latency_order_ms: 52,
+      });
+    }
+    if (state.data.trades.length > 200) state.data.trades.length = 200;
+    state.data.copytrade = WALLETS.map((w, i) => ({
+      wallet_address: w.address,
+      handle: w.handle,
+      tier: 1,
+      scale_factor: 0.1,
+      trades_copied: 12 + i * 3,
+      pnl_attributed: 45 + i * 12 + Math.random() * 20,
+      last_signal: new Date(now - i * 600000 - Math.random() * 3600000).toISOString(),
+      status: i % 4 === 3 ? 'idle' : 'watching',
+      pnl_history: Array.from({ length: 12 }, () => Math.random() * 30 - 5),
+    }));
+    if (!state.data.learning.length) {
+      state.data.learning = [
+        { ts: new Date(now - 86400000 * 2).toISOString(), parameter: 'allowed_price_range_no.max', old_value: '0.99', new_value: '0.97', reason: 'Price bucket 0.95-0.99 showed negative edge over 50 trades' },
+        { ts: new Date(now - 86400000 * 5).toISOString(), parameter: 'min_time_to_expiry_days', old_value: '7', new_value: '10', reason: 'Short-dated bucket underperformed with 35 samples' },
+      ];
+    }
+  }
+
+  function initDemoTrades() {
+    state.data = {
+      metrics: {},
+      positions: [],
+      trades: Array.from({ length: 80 }, (_, i) => ({
+        id: `t${i}`,
+        mode: 'paper',
+        market_name: `Market ${i}`,
+        category: ['crypto', 'macro', 'politics'][i % 3],
+        entry_price: 0.85,
+        exit_price: i % 3 === 0 ? 1.0 : 0,
+        size_shares: 100,
+        pnl_usd: i % 3 === 0 ? 15 : -8,
+        pnl_pct: i % 3 === 0 ? 17.6 : -9.4,
+        resolution: i % 3 === 0 ? 'Won' : i % 3 === 1 ? 'Lost' : 'Rejected',
+        source: i % 4 === 0 ? 'copy' : 'own',
+        copy_wallet: i % 4 === 0 ? WALLETS[i % 6].address : null,
+        opened_at: new Date(Date.now() - i * 86400000).toISOString(),
+        closed_at: new Date(Date.now() - i * 86400000 + 3600000).toISOString(),
+        latency_decision_ms: 15,
+        latency_order_ms: 48,
+      })),
+      copytrade: [],
+      learning: [],
+    };
+    generateDemoData();
+  }
+
+  async function fetchAll() {
+    let anyOk = false;
+    const metricsRaw = await fetchJson('/metrics');
+    const status = await fetchJson('/api/status');
+    const positions = await fetchJson('/positions');
+    const trades = await fetchJson('/trades');
+    const copytrade = await fetchJson('/copytrade/status');
+    const learning = await fetchJson('/learning/log');
+
+    if (!state.data) state.data = { metrics: {}, positions: [], trades: [], copytrade: [], learning: [] };
+
+    if (metricsRaw && metricsRaw.pnl_paper !== undefined) {
+      state.data.metrics = metricsRaw;
+      anyOk = true;
+    } else if (status) {
+      state.data.metrics = mapStatusToMetrics(status) || state.data.metrics;
+      if (!positions) state.data.positions = [];
+      if (!trades) state.data.trades = mapTradesFromStatus(status.recent_trades);
+      if (!learning) state.data.learning = (status.recent_tuning_events || []).map(e => ({
+        ts: e.ts, parameter: e.parameter, old_value: e.old_value, new_value: e.new_value, reason: e.reason,
+      }));
+      anyOk = true;
+    }
+    if (positions) { state.data.positions = positions; anyOk = true; }
+    if (trades) { state.data.trades = trades; anyOk = true; }
+    if (copytrade) { state.data.copytrade = copytrade; anyOk = true; }
+    if (learning) { state.data.learning = learning; anyOk = true; }
+
+    if (!anyOk) {
+      if (!state.demoMode) { state.demoMode = true; initDemoTrades(); }
+      generateDemoData();
+      state.connected = false;
+    } else {
+      state.demoMode = false;
+      state.connected = true;
+      if (state.data.metrics?.mode) state.displayMode = state.data.metrics.mode;
+    }
+
+    state.lastFetch = Date.now();
+    state.secondsSinceUpdate = 0;
+    state.stale = false;
+    renderAll();
+    updateHeader();
+  }
+
+  function updateHeader() {
+    document.body.classList.toggle('demo-mode', state.demoMode);
+    document.getElementById('demoBanner').classList.toggle('visible', state.demoMode);
+    document.getElementById('demoUrl').textContent = state.apiUrl;
+    const dot = document.getElementById('connDot');
+    dot.className = 'status-dot ' + (state.demoMode ? 'stale' : state.stale ? 'stale' : state.connected ? 'connected' : 'disconnected');
+    document.getElementById('connLabel').textContent = state.demoMode ? 'Demo' : state.stale ? 'Stale' : state.connected ? 'Connected' : 'Disconnected';
+    const pill = document.getElementById('modePill');
+    pill.className = 'mode-pill ' + state.displayMode;
+    document.getElementById('modePillText').textContent = state.displayMode.toUpperCase();
+  }
+
+  function pushKpiHistory(key, val) {
+    const h = state.kpiHistory[key];
+    h.push(val);
+    if (h.length > 20) h.shift();
+  }
+
+  function renderKPIs() {
+    const m = state.data?.metrics || {};
+    const total = (m.pnl_paper || 0) + (m.pnl_live || 0);
+    const kpis = [
+      { key: 'total', label: 'Total PnL', value: total, sub: `+${fmt.usd(m.daily_loss || 243)} today`, fmt: 'signedUsd' },
+      { key: 'paper', label: 'PAPER PnL', value: m.pnl_paper || 0, sub: 'Unrealized incl.', fmt: 'signedUsd' },
+      { key: 'live', label: 'LIVE PnL', value: state.displayMode === 'live' ? (m.pnl_live || 0) : null, sub: state.displayMode === 'live' ? 'Active' : 'Not in LIVE', fmt: 'signedUsd' },
+      { key: 'positions', label: 'Open Positions', value: m.open_positions_count || 0, sub: `${m.open_positions_count || 0} NO / 0 YES`, fmt: 'num' },
+      { key: 'winrate', label: 'Win Rate', value: (m.win_rate || 0) * 100, sub: 'All resolved', fmt: 'pct100' },
+      { key: 'drawdown', label: 'Max Drawdown', value: (m.max_drawdown || 0) * 100, sub: `Drawdown: ${((m.max_drawdown || 0) * 100).toFixed(1)}%`, fmt: 'pct100', dd: (m.max_drawdown || 0) * 100 },
+    ];
+    const el = document.getElementById('kpiStrip');
+    const cap = 10000;
+    el.innerHTML = kpis.map(k => {
+      pushKpiHistory(k.key, typeof k.value === 'number' ? k.value : 0);
+      let display;
+      if (k.value === null) display = '—';
+      else if (k.fmt === 'signedUsd' && state.pnlFormat === 'pct') display = `${((k.value / cap) * 100).toFixed(2)}%`;
+      else if (k.fmt === 'signedUsd') display = fmt.signedUsd(k.value);
+      else if (k.fmt === 'pct100') display = `${k.value.toFixed(1)}%`;
+      else display = fmt.num(k.value);
+      let cls = k.value === null ? 'neu' : k.fmt.includes('pct') || k.key === 'positions' ? 'neu' : pnlClass(k.value);
+      if (k.key === 'drawdown' && k.dd > 15) cls = 'neg';
+      else if (k.key === 'drawdown' && k.dd > 10) cls = 'warn';
+      const flash = state.prevKpi[k.key] !== undefined && state.prevKpi[k.key] !== k.value ? ' flash' : '';
+      state.prevKpi[k.key] = k.value;
+      const ddCls = '';
+      return `<div class="kpi-card">
+        <div class="kpi-label">${k.label}</div>
+        <div class="kpi-value mono ${cls} ${ddCls}${flash}">${display}</div>
+        <div class="kpi-sub">${k.sub}</div>
+        ${sparklineSvg(state.kpiHistory[k.key])}
+      </div>`;
+    }).join('');
+  }
+
+  function renderEquityCurve() {
+    const hist = state.data?.metrics?.equity_history || [];
+    const filtered = filterEquityHistory(hist);
+    const labels = filtered.map(p => new Date(p.ts).toLocaleTimeString());
+    const paper = filtered.map(p => p.paper);
+    const live = filtered.map(p => p.live);
+
+    if (!state.equityChart) {
+      const ctx = document.getElementById('equityChart').getContext('2d');
+      state.equityChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { label: 'PAPER', data: paper, borderColor: '#01696f', backgroundColor: 'rgba(1,105,111,0.1)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 },
+            { label: 'LIVE', data: live, borderColor: '#6daa45', borderDash: [], fill: false, tension: 0.3, pointRadius: 0, borderWidth: 2 },
+            { label: 'Start Capital', data: filtered.map(() => 10000), borderColor: '#4a4947', borderDash: [4, 4], pointRadius: 0, borderWidth: 1 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+          plugins: { legend: { labels: { color: '#797876', font: { family: 'Satoshi' } } } },
+          scales: {
+            x: { ticks: { color: '#4a4947', maxTicksLimit: 8 }, grid: { color: '#2a2826' } },
+            y: { ticks: { color: '#4a4947', callback: v => '$' + v.toLocaleString() }, grid: { color: '#2a2826' } },
+          },
+        },
+      });
+    } else {
+      state.equityChart.data.labels = labels;
+      state.equityChart.data.datasets[0].data = paper;
+      state.equityChart.data.datasets[1].data = live;
+      state.equityChart.data.datasets[2].data = filtered.map(() => 10000);
+      state.equityChart.update('none');
+    }
+  }
+
+  function filterEquityHistory(hist) {
+    const now = Date.now();
+    if (state.equityRange === 'today') return hist.filter(p => p.ts > now - 86400000);
+    if (state.equityRange === '7d') return hist.filter(p => p.ts > now - 7 * 86400000);
+    if (state.equityRange === '30d') return hist.filter(p => p.ts > now - 30 * 86400000);
+    return hist;
+  }
+
+  function barPct(current, limit) {
+    const p = limit ? current / limit : 0;
+    return { pct: Math.min(100, p * 100), cls: p > 0.85 ? 'dang' : p > 0.6 ? 'warn' : 'ok' };
+  }
+
+  function renderExposure() {
+    const m = state.data?.metrics || {};
+    const renderBars = (items, elId) => {
+      document.getElementById(elId).innerHTML = (items || []).map(it => {
+        const b = barPct(it.current, it.limit);
+        return `<div class="bar-chart-item">
+          <div class="bar-label"><span>${it.name}</span><span class="mono">${fmt.usd(it.current)} / ${fmt.usd(it.limit)}</span></div>
+          <div class="bar-track"><div class="bar-fill ${b.cls}" style="width:${b.pct}%"></div></div>
+        </div>`;
+      }).join('') || '<div class="empty-state">No exposure data yet</div>';
+    };
+    renderBars(m.category_exposure, 'catExposure');
+    renderBars(m.asset_exposure, 'assetExposure');
+    const capPct = barPct(m.capital_deployed, m.capital_limit);
+    const lossPct = barPct(m.daily_loss, m.daily_loss_limit);
+    document.getElementById('riskStatus').innerHTML = `
+      <div class="risk-item"><label>Capital deployed</label><div class="bar-track"><div class="bar-fill ${capPct.cls}" style="width:${capPct.pct}%"></div></div><span class="mono" style="font-size:11px">${fmt.usd(m.capital_deployed)} / ${fmt.usd(m.capital_limit)}</span></div>
+      <div class="risk-item"><label>Daily loss</label><div class="bar-track"><div class="bar-fill ${lossPct.cls}" style="width:${lossPct.pct}%"></div></div><span class="mono" style="font-size:11px">${fmt.usd(m.daily_loss)} / ${fmt.usd(m.daily_loss_limit)}</span></div>
+      <div class="risk-item"><label>Circuit breaker</label><span class="${m.circuit_breaker_active ? 'circuit-bad' : 'circuit-ok'}">${m.circuit_breaker_active ? 'TRIGGERED' : 'ACTIVE'}</span></div>`;
+  }
+
+  function filterSortPositions() {
+    let rows = [...(state.data?.positions || [])];
+    const mode = document.getElementById('posModeFilter').value;
+    const cat = document.getElementById('posCatFilter').value;
+    const q = document.getElementById('posSearch').value.toLowerCase();
+    if (mode) rows = rows.filter(r => r.mode === mode);
+    if (cat) rows = rows.filter(r => r.category === cat);
+    if (q) rows = rows.filter(r => JSON.stringify(r).toLowerCase().includes(q));
+    const { col, dir } = state.posSort;
+    rows.sort((a, b) => (a[col] > b[col] ? 1 : -1) * dir);
+    return rows;
+  }
+
+  function renderPositionsTable() {
+    const rows = filterSortPositions();
+    const cats = [...new Set((state.data?.positions || []).map(p => p.category))];
+    const catSel = document.getElementById('posCatFilter');
+    if (catSel.options.length <= 1) cats.forEach(c => { const o = document.createElement('option'); o.value = c; o.textContent = c; catSel.appendChild(o); });
+
+    document.getElementById('positionsBody').innerHTML = rows.map(r => `
+      <tr>
+        <td><span class="pill pill-${r.mode}" aria-label="Mode ${r.mode}">${r.mode.toUpperCase()}</span></td>
+        <td style="font-family:var(--font-ui)">${r.market_name}</td>
+        <td>${r.category}</td>
+        <td>${truncAddr(r.token_id)}</td>
+        <td>NO</td>
+        <td>${r.entry_price?.toFixed(4)}</td>
+        <td>${r.current_price?.toFixed(4)}</td>
+        <td>${r.size_shares?.toFixed(1)}</td>
+        <td class="${pnlClass(r.pnl_usd)}">${fmt.signedUsd(r.pnl_usd || 0)}</td>
+        <td class="${pnlClass(r.pnl_usd)}">${(r.pnl_pct || 0).toFixed(2)}%</td>
+        <td style="font-family:var(--font-ui)">${r.source === 'copy' ? 'Copy' : 'Own Strategy'}</td>
+        <td>${r.copy_wallet ? `<a href="#" class="copy-link" data-addr="${r.copy_wallet}">${truncAddr(r.copy_wallet)}</a>` : '—'}</td>
+        <td>${r.opened_at ? new Date(r.opened_at).toLocaleString() : '—'}</td>
+        <td><button class="btn-sm close-pos" data-id="${r.id}" aria-label="Close position">✕ Close</button></td>
+      </tr>`).join('') || `<tr><td colspan="14" class="empty-state">No open positions</td></tr>`;
+    document.getElementById('positionsFooter').textContent = `Showing ${rows.length} of ${(state.data?.positions || []).length} open positions`;
+
+    document.querySelectorAll('.close-pos').forEach(btn => {
+      btn.onclick = async () => {
+        if (state.demoMode) return alert('Demo mode — close not available');
+        try { await fetch(`${state.apiUrl}/position/${btn.dataset.id}`, { method: 'DELETE' }); fetchAll(); } catch {}
+      };
+    });
+    document.querySelectorAll('.copy-link').forEach(a => {
+      a.onclick = e => { e.preventDefault(); navigator.clipboard.writeText(a.dataset.addr); };
+    });
+  }
+
+  function renderTradeLog() {
+    let rows = [...(state.data?.trades || [])];
+    const mode = document.getElementById('tradeModeFilter').value;
+    const outcome = document.getElementById('tradeOutcomeFilter').value;
+    const q = document.getElementById('tradeSearch').value.toLowerCase();
+    if (mode) rows = rows.filter(r => r.mode === mode);
+    if (outcome) rows = rows.filter(r => r.resolution === outcome);
+    if (q) rows = rows.filter(r => JSON.stringify(r).toLowerCase().includes(q));
+    const total = rows.length;
+    const pageSize = 50;
+    const page = state.tradePage;
+    const slice = rows.slice(page * pageSize, (page + 1) * pageSize);
+
+    document.getElementById('tradesBody').innerHTML = slice.map((r, idx) => {
+      const resCls = r.resolution === 'Won' ? 'pill-won' : r.resolution === 'Lost' ? 'pill-lost' : 'pill-rej';
+      return `<tr class="trade-row" data-idx="${page * pageSize + idx}" style="cursor:pointer">
+        <td><span class="pill pill-${r.mode}">${r.mode?.toUpperCase()}</span></td>
+        <td style="font-family:var(--font-ui)">${r.market_name}</td>
+        <td>${r.category || '—'}</td>
+        <td>${r.entry_price?.toFixed(4)}</td>
+        <td>${r.exit_price?.toFixed(4) ?? '—'}</td>
+        <td class="${pnlClass(r.pnl_usd)}">${r.pnl_usd != null ? fmt.signedUsd(r.pnl_usd) : '—'}</td>
+        <td class="${pnlClass(r.pnl_usd)}">${r.pnl_pct != null ? r.pnl_pct.toFixed(2) + '%' : '—'}</td>
+        <td><span class="pill ${resCls}">${r.resolution}</span></td>
+        <td style="font-family:var(--font-ui)">${r.source === 'copy' ? 'Copy' : 'Own'}</td>
+        <td>${r.closed_at ? new Date(r.closed_at).toLocaleString() : '—'}</td>
+      </tr>
+      <tr class="expand-row" id="exp-${page * pageSize + idx}"><td colspan="10"><div class="expand-content">
+        Token: ${r.token_id || '—'} · Wallet: ${r.copy_wallet || '—'} · Latency: decision ${r.latency_decision_ms}ms / order ${r.latency_order_ms}ms
+      </div></td></tr>`;
+    }).join('') || `<tr><td colspan="10" class="empty-state">No resolved trades yet</td></tr>`;
+
+    document.getElementById('tradesFooter').innerHTML = `${total.toLocaleString()} resolved trades · Page ${page + 1}/${Math.max(1, Math.ceil(total / pageSize))}
+      ${page > 0 ? '<button class="btn-sm" id="prevPage">Prev</button>' : ''}
+      ${(page + 1) * pageSize < total ? '<button class="btn-sm" id="nextPage">Next</button>' : ''}`;
+
+    document.querySelectorAll('.trade-row').forEach(row => {
+      row.onclick = () => document.getElementById(`exp-${row.dataset.idx}`)?.classList.toggle('open');
+    });
+    document.getElementById('prevPage')?.addEventListener('click', () => { state.tradePage--; renderTradeLog(); });
+    document.getElementById('nextPage')?.addEventListener('click', () => { state.tradePage++; renderTradeLog(); });
+  }
+
+  function renderCopyTrading() {
+    const wallets = state.data?.copytrade?.length ? state.data.copytrade : WALLETS.map(w => ({
+      handle: w.handle, wallet_address: w.address, tier: 1, scale_factor: 0.1,
+      trades_copied: 0, pnl_attributed: 0, last_signal: null, status: 'idle', pnl_history: [],
+    }));
+    document.getElementById('walletGrid').innerHTML = wallets.map(w => `
+      <div class="wallet-card">
+        <div class="wallet-header">
+          <div><div class="wallet-name">${w.handle}</div><div class="wallet-addr">${truncAddr(w.wallet_address)} <i data-lucide="copy" width="12" class="copy-icon" data-addr="${w.wallet_address}"></i></div></div>
+          <span class="pill" style="background:var(--color-surface-3)">Tier ${w.tier || 1}</span>
+        </div>
+        <div style="font-size:var(--text-xs);color:var(--color-text-muted);margin-bottom:8px">Scale: ${((w.scale_factor || 0.1) * 100).toFixed(0)}%</div>
+        <div class="mono" style="font-size:var(--text-xs)">Copied: ${w.trades_copied || 0} · PnL: <span class="${pnlClass(w.pnl_attributed)}">${fmt.signedUsd(w.pnl_attributed || 0)}</span></div>
+        <div style="font-size:11px;color:var(--color-text-faint);margin-top:8px">Last signal: ${w.last_signal ? new Date(w.last_signal).toLocaleString() : 'Never'}</div>
+        <div style="margin-top:8px;font-size:var(--text-xs)"><span class="watch-dot ${w.status === 'watching' ? 'on' : 'off'}"></span>${w.status === 'watching' ? 'Watching' : 'No recent activity'}</div>
+        ${sparklineSvg(w.pnl_history || [])}
+      </div>`).join('');
+    document.querySelectorAll('.copy-icon').forEach(el => {
+      el.onclick = () => navigator.clipboard.writeText(el.dataset.addr);
+    });
+  }
+
+  function renderLearningLog() {
+    const items = state.data?.learning || [];
+    const el = document.getElementById('learningFeed');
+    el.innerHTML = items.length ? items.map(e => `
+      <div class="learning-item">
+        <div style="color:var(--color-text-faint);margin-bottom:4px">${new Date(e.ts).toLocaleString()}</div>
+        <div><span class="learning-param">${e.parameter}</span>: ${e.old_value} → ${e.new_value}</div>
+        <div style="margin-top:4px;color:var(--color-text-muted)">${e.reason}</div>
+      </div>`).join('') : '<div class="empty-state">No auto-tuning changes yet</div>';
+  }
+
+  function latColor(p99) { return p99 < 100 ? 'var(--color-success)' : p99 < 500 ? 'var(--color-warning)' : 'var(--color-error)'; }
+
+  function renderLatency() {
+    const m = state.data?.metrics || {};
+    const groups = [
+      { title: 'Decision latency', p50: m.latency_p50_decision, p95: m.latency_p95_decision, p99: m.latency_p99_decision },
+      { title: 'Order submission', p50: m.latency_p50_order, p95: m.latency_p95_order, p99: m.latency_p99_order },
+      { title: 'WS feed lag', p50: m.ws_feed_lag_p50, p95: m.ws_feed_lag_p95, p99: m.ws_feed_lag_p95 },
+    ];
+    const max = Math.max(...groups.flatMap(g => [g.p50, g.p95, g.p99].filter(Boolean)), 1);
+    document.getElementById('latencyGrid').innerHTML = groups.map(g => {
+      const col = latColor(g.p99 || 0);
+      const bar = (v, label) => `<div class="lat-bar"><span>${label}</span><div><i style="width:${((v||0)/max)*100}%;background:${col}"></i></div><span class="mono">${v||0}ms</span></div>`;
+      return `<div class="latency-card"><h4>${g.title}</h4>${bar(g.p50,'p50')}${bar(g.p95,'p95')}${bar(g.p99,'p99')}</div>`;
+    }).join('');
+  }
+
+  function renderAll() {
+    renderKPIs();
+    renderEquityCurve();
+    renderExposure();
+    renderPositionsTable();
+    renderTradeLog();
+    renderCopyTrading();
+    renderLearningLog();
+    renderLatency();
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function downloadCsv() {
+    const rows = state.data?.trades || [];
+    const header = 'mode,market,category,entry,exit,pnl_usd,pnl_pct,resolution,source,closed_at\n';
+    const body = rows.map(r => [r.mode, r.market_name, r.category, r.entry_price, r.exit_price, r.pnl_usd, r.pnl_pct, r.resolution, r.source, r.closed_at].join(',')).join('\n');
+    const blob = new Blob([header + body], { type: 'text/csv' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'polybot-trades.csv'; a.click();
+  }
+
+  async function downloadConfig() {
+    const cfg = await fetchJson('/config') || { note: 'Config endpoint not available', apiUrl: state.apiUrl };
+    const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'polybot-config.json'; a.click();
+  }
+
+  async function postMode(mode) {
+    if (state.demoMode) { state.displayMode = mode; updateHeader(); return; }
+    try {
+      await fetch(`${state.apiUrl}/mode`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) });
+      state.displayMode = mode;
+      updateHeader();
+    } catch { alert('Failed to switch mode'); }
+  }
+
+  function initEventListeners() {
+    document.getElementById('settingsBtn').onclick = () => { document.getElementById('overlay').classList.add('open'); document.getElementById('settingsPanel').classList.add('open'); };
+    document.getElementById('closeSettings').onclick = closeSettings;
+    document.getElementById('overlay').onclick = closeSettings;
+    document.getElementById('demoConfigureBtn').onclick = () => document.getElementById('settingsBtn').click();
+
+    document.getElementById('apiUrl').value = state.apiUrl;
+    document.getElementById('apiUrl').onchange = e => { state.apiUrl = e.target.value; localStorage.setItem('polybot_api', state.apiUrl); fetchAll(); };
+
+    document.querySelectorAll('#refreshSeg button').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('#refreshSeg button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.refreshInterval = +btn.dataset.ms;
+        clearInterval(state.pollTimer);
+        state.pollTimer = setInterval(fetchAll, state.refreshInterval);
+      };
+    });
+
+    document.getElementById('modePill').onclick = () => {
+      if (state.displayMode === 'paper') document.getElementById('liveModal').classList.add('open');
+      else postMode('paper');
+    };
+    document.getElementById('cancelLive').onclick = () => document.getElementById('liveModal').classList.remove('open');
+    document.getElementById('confirmLive').onclick = () => {
+      document.getElementById('liveModal').classList.remove('open');
+      document.querySelectorAll('#displayModeSeg button').forEach(b => b.classList.toggle('active', b.dataset.mode === 'live'));
+      postMode('live');
+    };
+
+    document.querySelectorAll('#equityRange button').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('#equityRange button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.equityRange = btn.dataset.range;
+        renderEquityCurve();
+      };
+    });
+
+    ['posModeFilter','posCatFilter','posSearch','tradeModeFilter','tradeOutcomeFilter','tradeSearch'].forEach(id => {
+      document.getElementById(id).addEventListener('input', () => { renderPositionsTable(); renderTradeLog(); });
+    });
+
+    document.querySelectorAll('#positionsTable th[data-sort]').forEach(th => {
+      th.onclick = () => {
+        const col = th.dataset.sort;
+        if (state.posSort.col === col) state.posSort.dir *= -1;
+        else { state.posSort.col = col; state.posSort.dir = -1; }
+        renderPositionsTable();
+      };
+    });
+
+    document.querySelectorAll('#displayModeSeg button').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('#displayModeSeg button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        if (btn.dataset.mode === 'live') document.getElementById('liveModal').classList.add('open');
+        else postMode('paper');
+      };
+    });
+
+    document.querySelectorAll('#pnlDisplaySeg button').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('#pnlDisplaySeg button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.pnlFormat = btn.dataset.fmt;
+        renderKPIs();
+      };
+    });
+
+    document.getElementById('downloadCsv').onclick = downloadCsv;
+    document.getElementById('downloadConfig').onclick = downloadConfig;
+
+    document.querySelectorAll('.bottom-nav button').forEach(btn => {
+      btn.onclick = () => {
+        if (btn.dataset.section === 'settings') { document.getElementById('settingsBtn').click(); return; }
+        document.getElementById(btn.dataset.section)?.scrollIntoView({ behavior: 'smooth' });
+        document.querySelectorAll('.bottom-nav button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+      };
+    });
+
+    document.querySelectorAll('.sidebar nav a').forEach(a => {
+      a.onclick = () => {
+        document.querySelectorAll('.sidebar nav a').forEach(x => x.classList.remove('active'));
+        a.classList.add('active');
+      };
+    });
+  }
+
+  function closeSettings() {
+    document.getElementById('overlay').classList.remove('open');
+    document.getElementById('settingsPanel').classList.remove('open');
+  }
+
+  function init() {
+    initEventListeners();
+    fetchAll();
+    state.pollTimer = setInterval(fetchAll, state.refreshInterval);
+    state.updateTimer = setInterval(() => {
+      state.secondsSinceUpdate++;
+      document.getElementById('lastUpdated').textContent = `Last updated: ${state.secondsSinceUpdate}s ago`;
+      if (state.secondsSinceUpdate > 10 && state.connected) {
+        state.stale = true;
+        updateHeader();
+      }
+    }, 1000);
+    if (window.lucide) lucide.createIcons();
+  }
+
+  return { init };
+})();
+
+document.addEventListener('DOMContentLoaded', PolyBotDashboard.init);
+</script>
+</body>
+</html>
