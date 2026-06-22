@@ -34,11 +34,17 @@ impl GammaClient {
         }
 
         let markets: Vec<GammaMarket> = resp.json().await.context("gamma markets json")?;
-
-        Ok(markets
+        let raw_count = markets.len();
+        let parsed: Vec<MarketMeta> = markets
             .into_iter()
             .filter_map(|m| self.to_market_meta(m))
-            .collect())
+            .collect();
+        tracing::debug!(
+            raw = raw_count,
+            parsed = parsed.len(),
+            "gamma markets parsed"
+        );
+        Ok(parsed)
     }
 
     fn to_market_meta(&self, m: GammaMarket) -> Option<MarketMeta> {
@@ -50,10 +56,9 @@ impl GammaClient {
             return None;
         }
         let end = m
-            .end_date_iso
+            .end_date
             .as_deref()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&Utc))
+            .and_then(parse_gamma_date)
             .unwrap_or_else(|| Utc::now() + chrono::Duration::days(30));
 
         let question = m.question.as_deref().unwrap_or("");
@@ -78,6 +83,7 @@ async fn retry_get(client: &Client, url: &str) -> Result<reqwest::Response> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GammaMarket {
     id: String,
     question: Option<String>,
@@ -85,14 +91,49 @@ struct GammaMarket {
     tags: Option<Vec<String>>,
     #[serde(default)]
     condition_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_clob_token_ids")]
     clob_token_ids: Option<Vec<String>>,
     #[serde(default)]
     enable_order_book: Option<bool>,
     #[serde(default)]
-    end_date_iso: Option<String>,
+    end_date: Option<String>,
     #[serde(default)]
     liquidity_num: Option<f64>,
+}
+
+/// Gamma returns `clobTokenIds` as a JSON-encoded string, not a native array.
+fn deserialize_clob_token_ids<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::Array(items)) => Ok(Some(
+            items
+                .into_iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+        )),
+        Some(serde_json::Value::String(raw)) => {
+            serde_json::from_str(&raw).map(Some).map_err(Error::custom)
+        }
+        Some(_) => Ok(None),
+    }
+}
+
+fn parse_gamma_date(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+        .or_else(|| {
+            chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+                .ok()
+                .and_then(|d| d.and_hms_opt(23, 59, 59))
+                .map(|dt| dt.and_utc())
+        })
 }
 
 /// POLYMARKET_INTEGRATION: refine category mapping using Gamma tags
@@ -110,7 +151,7 @@ pub fn classify_market(question: &str, tags: &[String]) -> (String, String) {
         "OTHER".to_string()
     };
 
-    let category = if tag_str.contains("crypto") || q.contains("bitcoin") || q.contains("ethereum") {
+    let category = if tag_str.contains("crypto") || q.contains("bitcoin") || q.contains("btc") || q.contains("ethereum") {
         "crypto".to_string()
     } else if tag_str.contains("politic") || q.contains("election") || q.contains("president") {
         "politics".to_string()
@@ -134,5 +175,37 @@ mod tests {
         let (cat, und) = classify_market("Will BTC exceed 100k?", &["crypto".into()]);
         assert_eq!(cat, "crypto");
         assert_eq!(und, "BTC");
+    }
+
+    #[test]
+    fn parses_gamma_market_json() {
+        let raw = r#"{
+            "id": "540817",
+            "question": "Will BTC exceed 100k?",
+            "conditionId": "0xabc",
+            "clobTokenIds": "[\"111\", \"222\"]",
+            "enableOrderBook": true,
+            "endDate": "2026-07-31T12:00:00Z",
+            "liquidityNum": 17572.66
+        }"#;
+        let market: GammaMarket = serde_json::from_str(raw).unwrap();
+        assert_eq!(market.condition_id.as_deref(), Some("0xabc"));
+        assert_eq!(
+            market.clob_token_ids,
+            Some(vec!["111".into(), "222".into()])
+        );
+        assert_eq!(market.enable_order_book, Some(true));
+
+        let client = GammaClient::new(&ExchangeConfig {
+            gamma_base_url: "https://gamma-api.polymarket.com".into(),
+            data_api_base_url: String::new(),
+            clob_host: String::new(),
+            chain_id: 137,
+            market_discovery_limit: 200,
+        });
+        let meta = client.to_market_meta(market).expect("valid market");
+        assert_eq!(meta.yes_token_id, "111");
+        assert_eq!(meta.no_token_id, "222");
+        assert_eq!(meta.category, "crypto");
     }
 }
