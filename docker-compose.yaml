@@ -1,0 +1,23 @@
+services:
+  polybot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polymarket-no-bot:latest
+    container_name: polymarket-no-bot
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - polybot-data:/app/data
+    environment:
+      RUST_LOG: info
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+volumes:
+  polybot-data:

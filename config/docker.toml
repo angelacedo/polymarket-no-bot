@@ -1,0 +1,111 @@
+# Docker deployment config — paper mode, metrics exposed on all interfaces
+
+[execution]
+mode = "paper"
+baseline_latency_ms = 50
+latency_jitter_ms = 30
+
+[metrics]
+bind_addr = "0.0.0.0:8080"
+
+[storage]
+database_path = "/app/data/bot.db"
+
+[risk]
+total_capital = 10000.0
+max_invested_capital_fraction = 0.70
+max_daily_loss_fraction = 0.05
+max_drawdown_fraction = 0.15
+max_risk_per_trade_fraction = 0.02
+max_notional_per_market = 200.0
+allowed_price_range_no = [0.75, 0.99]
+min_time_to_expiry_days = 7
+max_category_risk_fraction = 0.25
+max_asset_risk_fraction = 0.15
+
+[strategy]
+scan_interval_secs = 60
+min_liquidity_usd = 500.0
+slippage_band = 0.02
+prefer_no_momentum = true
+momentum_window_secs = 3600
+
+[copytrade]
+poll_interval_ms = 1500
+
+[[copytrade.wallets]]
+address = "0x3b7ed1242417f4b8f6992b5dd53aa9415a2c23eb"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+[[copytrade.wallets]]
+address = "0x56687bf447db6ffa42ffe2204a05edaa20f55839"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+[[copytrade.wallets]]
+address = "0x78b9ac44a6d7d7a076c14e0ad518b301b63c6b76"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+[[copytrade.wallets]]
+address = "0x16f91db2592924cfed6e03b7e5cb5bb1e32299e3"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+[[copytrade.wallets]]
+address = "0x863134d00841b2e200492805a01e1e2f5defaa53"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+[[copytrade.wallets]]
+address = "0x02227b8f5a9636e895607edd3185ed6ee5598ff7"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+[learning]
+analysis_interval_hours = 24
+min_sample_size = 30
+win_rate_threshold = 0.45
+scale_adjust_pct = 0.10
+
+[learning.bounds]
+min_price_no_min = 0.70
+min_price_no_max = 0.90
+max_price_no_min = 0.90
+max_price_no_max = 0.995
+min_time_to_expiry_days_min = 3
+min_time_to_expiry_days_max = 90
+scale_factor_min = 0.01
+scale_factor_max = 0.50
+
+[exchange]
+gamma_base_url = "https://gamma-api.polymarket.com"
+data_api_base_url = "https://data-api.polymarket.com"
+clob_host = "https://clob.polymarket.com"
+chain_id = 137
+market_discovery_limit = 200
