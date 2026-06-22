@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 
+use super::retry::retry_get as shared_retry_get;
 use crate::config::ExchangeConfig;
 use crate::types::{Side, WalletTradeEvent};
 
@@ -21,10 +22,7 @@ impl DataApiClient {
 
     pub async fn fetch_trades(&self, wallet: &str, limit: u32) -> Result<Vec<WalletTradeEvent>> {
         let url = format!("{}/trades?user={wallet}&limit={limit}", self.base_url);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        let resp = retry_get(&self.client, &url)
             .await
             .context("data api trades")?;
 
@@ -35,6 +33,10 @@ impl DataApiClient {
         let rows: Vec<DataTrade> = resp.json().await.context("data api trades json")?;
         Ok(rows.into_iter().filter_map(|t| t.into_event(wallet)).collect())
     }
+}
+
+async fn retry_get(client: &Client, url: &str) -> Result<reqwest::Response> {
+    shared_retry_get(client, url).await
 }
 
 #[derive(Debug, Deserialize)]

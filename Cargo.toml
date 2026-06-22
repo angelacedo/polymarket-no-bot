@@ -33,6 +33,12 @@ futures = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 dashmap = "6"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+secrecy = "0.10"
+alloy = { version = "1.8", default-features = false, features = ["signers"] }
 
 [dev-dependencies]
 tempfile = "3"

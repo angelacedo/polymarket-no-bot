@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
@@ -8,14 +9,18 @@ use tracing::{debug, info};
 use crate::config::BotConfig;
 use crate::exchange::{BookCache, ExchangeHub};
 use crate::storage::Storage;
-use crate::strategy::{scan_market};
+use crate::strategy::scan_market;
 use crate::types::{BookUpdate, MarketMeta, TradeSignal};
+
+const REFRESH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct StrategyEngine {
     config: BotConfig,
     hub: Arc<ExchangeHub>,
     storage: Storage,
     markets: HashMap<String, MarketMeta>,
+    last_refresh: Option<Instant>,
+    cached_token_ids: Vec<String>,
 }
 
 impl StrategyEngine {
@@ -25,10 +30,19 @@ impl StrategyEngine {
             hub,
             storage,
             markets: HashMap::new(),
+            last_refresh: None,
+            cached_token_ids: Vec::new(),
         }
     }
 
     pub async fn refresh_markets(&mut self) -> anyhow::Result<Vec<String>> {
+        if let Some(last) = self.last_refresh {
+            if last.elapsed() < REFRESH_CACHE_TTL {
+                debug!("market universe cache hit, skipping refresh");
+                return Ok(self.cached_token_ids.clone());
+            }
+        }
+
         let limit = self.config.exchange.market_discovery_limit;
         let markets = self.hub.discover_markets(limit).await?;
         let mut token_ids = Vec::new();
@@ -45,7 +59,14 @@ impl StrategyEngine {
             token_ids.push(m.no_token_id.clone());
             self.markets.insert(m.condition_id.clone(), m);
         }
-        info!(count = self.markets.len(), "market universe refreshed");
+
+        token_ids.sort();
+        token_ids.dedup();
+
+        self.cached_token_ids = token_ids.clone();
+        self.last_refresh = Some(Instant::now());
+
+        info!(count = self.markets.len(), tokens = token_ids.len(), "market universe refreshed");
         Ok(token_ids)
     }
 

@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 
+use super::retry::retry_get as shared_retry_get;
 use crate::config::ExchangeConfig;
 use crate::types::MarketMeta;
 
@@ -24,17 +25,17 @@ impl GammaClient {
             "{}/markets?active=true&closed=false&limit={limit}",
             self.base_url
         );
-        let resp: Vec<GammaMarket> = self
-            .client
-            .get(&url)
-            .send()
+        let resp = retry_get(&self.client, &url)
             .await
-            .context("gamma markets request")?
-            .json()
-            .await
-            .context("gamma markets json")?;
+            .context("gamma markets request")?;
 
-        Ok(resp
+        if !resp.status().is_success() {
+            anyhow::bail!("gamma api returned {}", resp.status());
+        }
+
+        let markets: Vec<GammaMarket> = resp.json().await.context("gamma markets json")?;
+
+        Ok(markets
             .into_iter()
             .filter_map(|m| self.to_market_meta(m))
             .collect())
@@ -70,6 +71,10 @@ impl GammaClient {
             liquidity_usd: m.liquidity_num.unwrap_or(0.0),
         })
     }
+}
+
+async fn retry_get(client: &Client, url: &str) -> Result<reqwest::Response> {
+    shared_retry_get(client, url).await
 }
 
 #[derive(Debug, Deserialize)]

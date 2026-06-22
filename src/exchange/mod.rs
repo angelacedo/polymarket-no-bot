@@ -1,6 +1,7 @@
 mod book;
 mod data_api;
 mod gamma;
+pub(crate) mod retry;
 
 use std::sync::Arc;
 
