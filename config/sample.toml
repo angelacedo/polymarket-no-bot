@@ -34,13 +34,64 @@ momentum_window_secs = 3600
 [copytrade]
 poll_interval_ms = 1500
 
+# phdcapital — Predicts.guru
 [[copytrade.wallets]]
-address = "0x0000000000000000000000000000000000000001"
+address = "0x3b7ed1242417f4b8f6992b5dd53aa9415a2c23eb"
 tier = 1
 scale_factor = 0.10
 max_daily_exposure_usd = 500.0
 min_trade_size_usd = 25.0
-allowed_categories = ["crypto", "macro"]
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+# Theo4 — PolyPulse
+[[copytrade.wallets]]
+address = "0x56687bf447db6ffa42ffe2204a05edaa20f55839"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+# Len9311238 — Polycopy
+[[copytrade.wallets]]
+address = "0x78b9ac44a6d7d7a076c14e0ad518b301b63c6b76"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+# Jenzigo — Merlin
+[[copytrade.wallets]]
+address = "0x16f91db2592924cfed6e03b7e5cb5bb1e32299e3"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+# RepTrump — Polydata
+[[copytrade.wallets]]
+address = "0x863134d00841b2e200492805a01e1e2f5defaa53"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
+blocked_categories = ["sports"]
+
+# HorizonSplendidView — 0xInsider / Polymarket
+[[copytrade.wallets]]
+address = "0x02227b8f5a9636e895607edd3185ed6ee5598ff7"
+tier = 1
+scale_factor = 0.10
+max_daily_exposure_usd = 500.0
+min_trade_size_usd = 25.0
+allowed_categories = ["crypto", "macro", "politics"]
 blocked_categories = ["sports"]
 
 [learning]
