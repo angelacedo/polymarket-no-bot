@@ -178,7 +178,7 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
         });
     };
 
-    let metrics_state = build_state(storage.clone(), registry.clone(), risk.clone());
+    let metrics_state = build_state(storage.clone(), registry.clone(), risk.clone(), backend.clone());
     let metrics_handle = {
         let server = MetricsServer::new(config.metrics.bind_addr.clone());
         tokio::spawn(async move {

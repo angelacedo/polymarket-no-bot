@@ -12,7 +12,20 @@ jobs:
     if: ${{ github.event.inputs.confirm == 'reset' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Clear all trading history on VPS
+      - name: Reset via admin API (preferred)
+        run: |
+          set -euo pipefail
+          TOKEN="${{ secrets.ADMIN_RESET_TOKEN }}"
+          if [ -z "$TOKEN" ]; then
+            TOKEN="polybot-reset-secret"
+          fi
+          RESP=$(curl -fsS -X POST \
+            -H "X-Admin-Token: ${TOKEN}" \
+            "https://polybot.stackmint.cloud/api/admin/reset")
+          echo "$RESP"
+
+      - name: Fallback — SSH wipe if API not yet deployed
+        if: failure()
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -21,30 +34,9 @@ jobs:
           script_stop: true
           script: |
             set -euo pipefail
-            echo "Stopping container..."
             docker stop polymarket-no-bot || true
-
-            echo "Wiping all trade history..."
-            docker run --rm \
-              -v polybot-data:/data \
-              alpine sh -c "
-                apk add --no-cache sqlite >/dev/null 2>&1
-                sqlite3 /data/bot.db '
-                  DELETE FROM trades;
-                  DELETE FROM orders;
-                  DELETE FROM equity_curve;
-                  DELETE FROM positions_snapshot;
-                  VACUUM;
-                '
-                echo \"Remaining rows:\"
-                sqlite3 /data/bot.db 'SELECT \"trades:\", COUNT(*) FROM trades;'
-                sqlite3 /data/bot.db 'SELECT \"orders:\", COUNT(*) FROM orders;'
-                sqlite3 /data/bot.db 'SELECT \"equity_curve:\", COUNT(*) FROM equity_curve;'
-                sqlite3 /data/bot.db 'SELECT \"positions_snapshot:\", COUNT(*) FROM positions_snapshot;'
-              "
-
-            echo "Restarting container with latest image..."
-            docker compose -f /root/polymarket-no-bot/docker-compose.yml pull
+            docker run --rm -v polybot-data:/data alpine sh -c "
+              apk add --no-cache sqlite >/dev/null 2>&1
+              sqlite3 /data/bot.db 'DELETE FROM trades; DELETE FROM orders; DELETE FROM equity_curve; DELETE FROM positions_snapshot; VACUUM;'
+            "
             docker compose -f /root/polymarket-no-bot/docker-compose.yml up -d
-
-            echo "Done. All trade history cleared; bot restarted with fresh paper state."

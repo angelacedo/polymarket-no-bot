@@ -3,17 +3,19 @@ use std::sync::Arc;
 use axum::{
     Router,
     extract::State,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
-    routing::get,
+    routing::{get, post},
 };
 use parking_lot::RwLock;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tracing::info;
 
+use crate::execution::ExecutionBackend;
 use crate::risk::RiskEngine;
 use crate::storage::Storage;
-use crate::types::{LatencyTracker, TuningAuditRecord, TradeRecord};
+use crate::types::{ExecutionMode, LatencyTracker, TuningAuditRecord, TradeRecord};
 
 use super::MetricsRegistry;
 
@@ -22,6 +24,8 @@ pub struct AppState {
     pub storage: Storage,
     pub registry: MetricsRegistry,
     pub risk: Arc<RwLock<RiskEngine>>,
+    pub backend: Arc<dyn ExecutionBackend>,
+    pub admin_reset_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +58,7 @@ impl MetricsServer {
         let app = Router::new()
             .route("/metrics", get(prometheus_metrics))
             .route("/api/status", get(json_status))
+            .route("/api/admin/reset", post(admin_reset))
             .route("/dashboard", get(dashboard_page))
             .with_state(state);
 
@@ -118,6 +123,53 @@ async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse 
 
 async fn dashboard_page() -> impl IntoResponse {
     Html(super::dashboard::page())
+}
+
+async fn admin_reset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(expected) = state.admin_reset_token.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "reset endpoint disabled (ADMIN_RESET_TOKEN not set)".to_string(),
+        )
+            .into_response();
+    };
+
+    let provided = headers
+        .get("X-Admin-Token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided != expected {
+        return (StatusCode::UNAUTHORIZED, "invalid token".to_string()).into_response();
+    }
+
+    if let Err(e) = state.storage.reset_trading_history() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db reset failed: {e}"),
+        )
+            .into_response();
+    }
+
+    state.backend.reset_paper_portfolio();
+    {
+        let mut rk = state.risk.write();
+        rk.reset();
+        state.registry.update_from_risk(&rk, ExecutionMode::Paper);
+    }
+
+    info!("paper trading reset via admin endpoint");
+    (
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": true,
+            "message": "all trade history cleared; paper portfolio reset to starting capital"
+        })
+        .to_string(),
+    )
+        .into_response()
 }
 
 fn build_snapshot(state: &AppState) -> anyhow::Result<StatusSnapshot> {

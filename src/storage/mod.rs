@@ -294,6 +294,19 @@ impl Storage {
         )?;
         Ok(count as usize)
     }
+
+    /// Wipe all trading history (trades, orders, equity curve, position snapshots).
+    pub fn reset_trading_history(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "DELETE FROM trades;
+             DELETE FROM orders;
+             DELETE FROM equity_curve;
+             DELETE FROM positions_snapshot;
+             VACUUM;",
+        )?;
+        Ok(())
+    }
 }
 
 fn side_str(side: Side) -> &'static str {

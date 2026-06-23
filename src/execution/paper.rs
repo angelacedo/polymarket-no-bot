@@ -165,6 +165,17 @@ impl PaperBackend {
 
         mark
     }
+
+    /// Clear in-memory positions and restore starting capital.
+    pub fn reset_portfolio(&self) {
+        let capital = self.initial_capital;
+        let mut state = self.state.write();
+        state.positions.clear();
+        state.orders.clear();
+        state.usdc_available = capital;
+        state.usdc_locked = 0.0;
+        state.realized_pnl = 0.0;
+    }
 }
 
 /// Mid price for a token from the cached book, falling back to a one-sided
@@ -292,6 +303,10 @@ impl super::ExecutionBackend for PaperBackend {
 
     fn mark_and_settle(&self, exec_cfg: &ExecutionConfig) -> PortfolioMark {
         self.settle(exec_cfg)
+    }
+
+    fn reset_paper_portfolio(&self) {
+        self.reset_portfolio();
     }
 
     fn settle_resolved_markets(&self, resolutions: &HashMap<String, bool>) {

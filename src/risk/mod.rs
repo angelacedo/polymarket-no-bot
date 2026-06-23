@@ -54,6 +54,20 @@ impl RiskEngine {
         self.exposure = exposure;
     }
 
+    /// Reset PnL, exposure, and circuit breakers to a fresh paper-trading state.
+    pub fn reset(&mut self) {
+        let capital = self.config.total_capital;
+        self.exposure = ExposureSnapshot::default();
+        self.pnl = PnlSnapshot {
+            equity: capital,
+            peak_equity: capital,
+            ..Default::default()
+        };
+        self.circuit = CircuitBreakerState::default();
+        self.wallet_daily_exposure.clear();
+        self.daily_reset_date = None;
+    }
+
     pub fn maybe_reset_daily(&mut self, now: DateTime<Utc>) {
         let today = now.date_naive();
         let reset = self.daily_reset_date.map(|d| d.date_naive()) != Some(today);

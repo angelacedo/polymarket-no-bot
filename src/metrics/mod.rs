@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use crate::execution::ExecutionBackend;
 use crate::risk::RiskEngine;
 use crate::storage::Storage;
 use crate::types::{CircuitBreakerState, ExecutionMode, LatencyTracker, PnlSnapshot};
@@ -40,10 +41,14 @@ pub fn build_state(
     storage: Storage,
     registry: MetricsRegistry,
     risk: Arc<RwLock<RiskEngine>>,
+    backend: Arc<dyn ExecutionBackend>,
 ) -> AppState {
+    let admin_reset_token = std::env::var("ADMIN_RESET_TOKEN").ok();
     AppState {
         storage,
         registry,
         risk,
+        backend,
+        admin_reset_token,
     }
 }

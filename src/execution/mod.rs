@@ -42,6 +42,9 @@ pub trait ExecutionBackend: Send + Sync {
     /// `resolutions` maps condition_id → true if NO won (position pays out at
     /// $1), false if NO lost (position goes to $0).
     fn settle_resolved_markets(&self, _resolutions: &HashMap<String, bool>) {}
+
+    /// Reset in-memory paper portfolio to starting capital. No-op for live.
+    fn reset_paper_portfolio(&self) {}
 }
 
 pub enum Backend {
@@ -97,6 +100,13 @@ impl ExecutionBackend for Backend {
         match self {
             Self::Live(b) => b.settle_resolved_markets(resolutions),
             Self::Paper(b) => b.settle_resolved_markets(resolutions),
+        }
+    }
+
+    fn reset_paper_portfolio(&self) {
+        match self {
+            Self::Live(b) => b.reset_paper_portfolio(),
+            Self::Paper(b) => b.reset_paper_portfolio(),
         }
     }
 }

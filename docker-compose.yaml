@@ -10,6 +10,7 @@ services:
       - polybot-data:/app/data
     environment:
       RUST_LOG: info
+      ADMIN_RESET_TOKEN: ${ADMIN_RESET_TOKEN:-polybot-reset-secret}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/status"]
       interval: 30s
