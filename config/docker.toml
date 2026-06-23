@@ -15,7 +15,7 @@ bind_addr = "0.0.0.0:8080"
 database_path = "/app/data/bot.db"
 
 [risk]
-total_capital = 10000.0
+total_capital = 1000.0
 max_invested_capital_fraction = 0.70
 max_daily_loss_fraction = 0.05
 max_drawdown_fraction = 0.15
