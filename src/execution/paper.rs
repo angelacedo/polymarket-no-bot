@@ -14,7 +14,10 @@ use crate::exchange::BookCache;
 use crate::storage::Storage;
 use crate::types::{
     Balances, BookLevel, ExecutionMode, OrderRequest, OrderResult, OrderStatus, Position, Side,
+    TradeRecord,
 };
+
+use super::PortfolioMark;
 
 pub struct PaperBackend {
     config: ExecutionConfig,
@@ -30,6 +33,7 @@ struct PaperState {
     usdc_locked: f64,
     positions: HashMap<String, Position>,
     orders: HashMap<String, String>,
+    realized_pnl: f64,
 }
 
 impl PaperBackend {
@@ -79,6 +83,92 @@ impl PaperBackend {
         }
         let avg = if filled > 0.0 { cost / filled } else { 0.0 };
         (filled, avg)
+    }
+
+    /// Mark open positions to current book prices, settle any that hit
+    /// take-profit / stop-loss, recompute exposure authoritatively from the
+    /// surviving positions, and persist closing trades.
+    fn settle(&self, exec_cfg: &ExecutionConfig) -> PortfolioMark {
+        let mut closed_trades: Vec<TradeRecord> = Vec::new();
+        let mut mark = PortfolioMark::default();
+
+        {
+            let mut state = self.state.write();
+            let mut to_close: Vec<String> = Vec::new();
+
+            for (cond_id, pos) in state.positions.iter() {
+                // For a NO position the mark is what we could sell at: the best NO bid.
+                let mark_price = self
+                    .book_cache
+                    .get(&pos.token_id)
+                    .and_then(|b| b.best_bid())
+                    .unwrap_or(pos.avg_entry_price);
+
+                let hit_take_profit = mark_price >= exec_cfg.take_profit_price;
+                let hit_stop_loss = mark_price <= exec_cfg.stop_loss_price;
+
+                if hit_take_profit || hit_stop_loss {
+                    let realized = (mark_price - pos.avg_entry_price) * pos.size_shares;
+                    closed_trades.push(TradeRecord {
+                        id: None,
+                        ts: chrono::Utc::now(),
+                        mode: ExecutionMode::Paper,
+                        market_id: pos.condition_id.clone(),
+                        category: pos.category.clone(),
+                        underlying: pos.underlying.clone(),
+                        expiry: chrono::Utc::now(),
+                        side: pos.side,
+                        entry_price: pos.avg_entry_price,
+                        size_shares: pos.size_shares,
+                        source: pos.source.clone(),
+                        copy_wallet: pos.copy_wallet.clone(),
+                        exit_price: Some(mark_price),
+                        realized_pnl: Some(realized),
+                    });
+                    to_close.push(cond_id.clone());
+                } else {
+                    // Survivor: accumulate unrealized PnL and cost-basis exposure.
+                    let cost_basis = pos.avg_entry_price * pos.size_shares;
+                    mark.unrealized_pnl += (mark_price - pos.avg_entry_price) * pos.size_shares;
+                    mark.exposure.total_invested_usd += cost_basis;
+                    *mark.exposure.by_market.entry(pos.condition_id.clone()).or_default() +=
+                        cost_basis;
+                    *mark.exposure.by_category.entry(pos.category.clone()).or_default() +=
+                        cost_basis;
+                    *mark.exposure.by_asset.entry(pos.underlying.clone()).or_default() +=
+                        cost_basis;
+                    if let Some(wallet) = &pos.copy_wallet {
+                        *mark.exposure.by_wallet.entry(wallet.to_lowercase()).or_default() +=
+                            cost_basis;
+                    }
+                    mark.positions.push(pos.clone());
+                }
+            }
+
+            for cond_id in to_close {
+                if let Some(pos) = state.positions.remove(&cond_id) {
+                    let mark_price = self
+                        .book_cache
+                        .get(&pos.token_id)
+                        .and_then(|b| b.best_bid())
+                        .unwrap_or(pos.avg_entry_price);
+                    // Return proceeds of the sale to available balance.
+                    state.usdc_available += mark_price * pos.size_shares;
+                    state.realized_pnl += (mark_price - pos.avg_entry_price) * pos.size_shares;
+                }
+            }
+
+            mark.exposure.open_position_count = state.positions.len();
+            mark.realized_pnl = state.realized_pnl;
+        }
+
+        for trade in &closed_trades {
+            if let Err(e) = self.storage.insert_trade(trade) {
+                tracing::warn!(error = %e, "failed to persist closing trade");
+            }
+        }
+
+        mark
     }
 }
 
@@ -192,6 +282,10 @@ impl super::ExecutionBackend for PaperBackend {
     fn mode(&self) -> ExecutionMode {
         ExecutionMode::Paper
     }
+
+    fn mark_and_settle(&self, exec_cfg: &ExecutionConfig) -> PortfolioMark {
+        self.settle(exec_cfg)
+    }
 }
 
 #[cfg(test)]
@@ -223,6 +317,8 @@ mod tests {
                 mode: ExecutionMode::Paper,
                 baseline_latency_ms: 1,
                 latency_jitter_ms: 0,
+                take_profit_price: 0.985,
+                stop_loss_price: 0.55,
             },
             10_000.0,
             cache,
@@ -243,5 +339,75 @@ mod tests {
         let result = backend.place_order(req).await.unwrap();
         assert!(result.filled_shares > 0.0);
         assert!(matches!(result.status, OrderStatus::Filled | OrderStatus::PartiallyFilled));
+    }
+
+    fn exec_config() -> ExecutionConfig {
+        ExecutionConfig {
+            mode: ExecutionMode::Paper,
+            baseline_latency_ms: 1,
+            latency_jitter_ms: 0,
+            take_profit_price: 0.985,
+            stop_loss_price: 0.55,
+        }
+    }
+
+    fn book_with_bid(asset: &str, bid: f64, ask: f64) -> BookUpdate {
+        BookUpdate {
+            asset_id: asset.into(),
+            bids: vec![BookLevel { price: bid, size: 500.0 }],
+            asks: vec![BookLevel { price: ask, size: 500.0 }],
+            received_at: Instant::now(),
+        }
+    }
+
+    async fn open_no_position(backend: &PaperBackend, token: &str, price: f64) {
+        let req = OrderRequest {
+            client_order_id: Uuid::new_v4().to_string(),
+            token_id: token.into(),
+            condition_id: format!("cond-{token}"),
+            side: Side::No,
+            limit_price: price,
+            size_shares: 100.0,
+            mode: ExecutionMode::Paper,
+            source: "strategy".into(),
+            category: "crypto".into(),
+            underlying: "BTC".into(),
+        };
+        backend.place_order(req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mark_to_market_reports_unrealized_pnl() {
+        let cache = BookCache::new();
+        cache.update(book_with_bid("no-1", 0.85, 0.86));
+        let storage = Storage::in_memory().unwrap();
+        let backend = PaperBackend::new(exec_config(), 10_000.0, cache.clone(), storage);
+
+        open_no_position(&backend, "no-1", 0.86).await;
+        // Price rises but stays below take-profit: position stays open with gain.
+        cache.update(book_with_bid("no-1", 0.92, 0.93));
+
+        let mark = backend.mark_and_settle(&exec_config());
+        assert_eq!(mark.positions.len(), 1);
+        assert!(mark.unrealized_pnl > 0.0, "expected positive MTM, got {}", mark.unrealized_pnl);
+        assert!(mark.exposure.total_invested_usd > 0.0);
+        assert_eq!(mark.exposure.open_position_count, 1);
+    }
+
+    #[tokio::test]
+    async fn take_profit_settles_and_frees_exposure() {
+        let cache = BookCache::new();
+        cache.update(book_with_bid("no-1", 0.85, 0.86));
+        let storage = Storage::in_memory().unwrap();
+        let backend = PaperBackend::new(exec_config(), 10_000.0, cache.clone(), storage);
+
+        open_no_position(&backend, "no-1", 0.86).await;
+        // NO climbs to ~resolution: should trigger take-profit close.
+        cache.update(book_with_bid("no-1", 0.99, 0.995));
+
+        let mark = backend.mark_and_settle(&exec_config());
+        assert_eq!(mark.positions.len(), 0, "position should be settled");
+        assert!(mark.realized_pnl > 0.0, "expected realized gain, got {}", mark.realized_pnl);
+        assert_eq!(mark.exposure.total_invested_usd, 0.0, "exposure should free up");
     }
 }

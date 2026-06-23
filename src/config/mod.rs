@@ -34,6 +34,20 @@ pub struct ExecutionConfig {
     pub mode: ExecutionMode,
     pub baseline_latency_ms: u64,
     pub latency_jitter_ms: u64,
+    /// Close a NO position once its mark price reaches this level (resolution-win proxy).
+    #[serde(default = "default_take_profit_price")]
+    pub take_profit_price: f64,
+    /// Close a NO position once its mark price falls to this level (cut losers).
+    #[serde(default = "default_stop_loss_price")]
+    pub stop_loss_price: f64,
+}
+
+fn default_take_profit_price() -> f64 {
+    0.985
+}
+
+fn default_stop_loss_price() -> f64 {
+    0.55
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

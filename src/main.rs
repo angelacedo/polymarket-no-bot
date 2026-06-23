@@ -219,16 +219,26 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
         let risk = risk.clone();
         let registry = registry.clone();
         let storage = storage.clone();
+        let backend = backend.clone();
+        let exec_cfg = config.execution.clone();
         let mode = backend.mode();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
             loop {
                 interval.tick().await;
-                let mut rk = risk.write();
-                rk.maybe_reset_daily(chrono::Utc::now());
-                rk.update_mtm(0.0, 0.0);
-                registry.update_from_risk(&rk, mode);
-                let _ = storage.record_equity(mode, rk.pnl());
+                // Mark positions to market and settle take-profit / stop-loss exits.
+                let mark = backend.mark_and_settle(&exec_cfg);
+                {
+                    let mut rk = risk.write();
+                    rk.maybe_reset_daily(chrono::Utc::now());
+                    // Reconcile exposure from actual open positions so capital
+                    // frees up as positions close (avoids permanent "no headroom").
+                    rk.update_exposure(mark.exposure.clone());
+                    rk.update_mtm(mark.unrealized_pnl, mark.realized_pnl);
+                    registry.update_from_risk(&rk, mode);
+                    let _ = storage.record_equity(mode, rk.pnl());
+                }
+                let _ = storage.snapshot_positions(&mark.positions, mark.unrealized_pnl);
             }
         })
     };
