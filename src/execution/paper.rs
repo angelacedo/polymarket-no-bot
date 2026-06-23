@@ -97,11 +97,9 @@ impl PaperBackend {
             let mut to_close: Vec<String> = Vec::new();
 
             for (cond_id, pos) in state.positions.iter() {
-                // For a NO position the mark is what we could sell at: the best NO bid.
-                let mark_price = self
-                    .book_cache
-                    .get(&pos.token_id)
-                    .and_then(|b| b.best_bid())
+                // Mark to the mid price to avoid booking phantom bid-ask spread
+                // losses on a buy-and-hold-to-resolution NO position.
+                let mark_price = mid_price(&self.book_cache, &pos.token_id)
                     .unwrap_or(pos.avg_entry_price);
 
                 let hit_take_profit = mark_price >= exec_cfg.take_profit_price;
@@ -147,10 +145,7 @@ impl PaperBackend {
 
             for cond_id in to_close {
                 if let Some(pos) = state.positions.remove(&cond_id) {
-                    let mark_price = self
-                        .book_cache
-                        .get(&pos.token_id)
-                        .and_then(|b| b.best_bid())
+                    let mark_price = mid_price(&self.book_cache, &pos.token_id)
                         .unwrap_or(pos.avg_entry_price);
                     // Return proceeds of the sale to available balance.
                     state.usdc_available += mark_price * pos.size_shares;
@@ -169,6 +164,18 @@ impl PaperBackend {
         }
 
         mark
+    }
+}
+
+/// Mid price for a token from the cached book, falling back to a one-sided
+/// quote when only one side is present.
+fn mid_price(cache: &BookCache, token_id: &str) -> Option<f64> {
+    let book = cache.get(token_id)?;
+    match (book.best_bid(), book.best_ask()) {
+        (Some(bid), Some(ask)) => Some((bid + ask) / 2.0),
+        (Some(bid), None) => Some(bid),
+        (None, Some(ask)) => Some(ask),
+        (None, None) => None,
     }
 }
 
