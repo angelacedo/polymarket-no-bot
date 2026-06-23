@@ -1,6 +1,7 @@
 services:
   polybot:
     image: ghcr.io/angelacedo/polymarket-no-bot:latest
+    pull_policy: always
     container_name: polymarket-no-bot
     restart: unless-stopped
     expose:
