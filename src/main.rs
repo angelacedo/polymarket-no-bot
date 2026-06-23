@@ -138,7 +138,11 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
     let token_ids = strategy_engine.refresh_markets().await.unwrap_or_default();
     let markets_shared = Arc::new(RwLock::new(strategy_engine.markets().clone()));
 
-    let _book_feed = hub.start_book_feed(token_ids.clone(), book_tx);
+    // Dynamic WS subscription: strategy loop sends new token lists here when
+    // refresh_markets() discovers new markets after startup.
+    let (token_ids_tx, token_ids_rx) = tokio::sync::watch::channel(token_ids.clone());
+
+    let _book_feed = hub.start_book_feed(token_ids_rx, book_tx);
 
     let strategy_handle = {
         let cfg = config.clone();
@@ -151,6 +155,7 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
                 signal_tx.clone(),
                 cfg.strategy.scan_interval_secs,
                 Some(markets_shared.clone()),
+                Some(token_ids_tx),
             )
             .await;
         })
@@ -222,23 +227,51 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
         let backend = backend.clone();
         let exec_cfg = config.execution.clone();
         let mode = backend.mode();
+        let hub_for_resolution = hub.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            let mut mtm_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            // Check for market resolutions every 5 minutes.
+            let mut resolution_interval =
+                tokio::time::interval(std::time::Duration::from_secs(300));
             loop {
-                interval.tick().await;
-                // Mark positions to market and settle take-profit / stop-loss exits.
-                let mark = backend.mark_and_settle(&exec_cfg);
-                {
-                    let mut rk = risk.write();
-                    rk.maybe_reset_daily(chrono::Utc::now());
-                    // Reconcile exposure from actual open positions so capital
-                    // frees up as positions close (avoids permanent "no headroom").
-                    rk.update_exposure(mark.exposure.clone());
-                    rk.update_mtm(mark.unrealized_pnl, mark.realized_pnl);
-                    registry.update_from_risk(&rk, mode);
-                    let _ = storage.record_equity(mode, rk.pnl());
+                tokio::select! {
+                    _ = mtm_interval.tick() => {
+                        // Mark positions to market and settle take-profit / stop-loss exits.
+                        let mark = backend.mark_and_settle(&exec_cfg);
+                        {
+                            let mut rk = risk.write();
+                            rk.maybe_reset_daily(chrono::Utc::now());
+                            // Reconcile exposure from actual open positions so capital
+                            // frees up as positions close (avoids permanent "no headroom").
+                            rk.update_exposure(mark.exposure.clone());
+                            rk.update_mtm(mark.unrealized_pnl, mark.realized_pnl);
+                            registry.update_from_risk(&rk, mode);
+                            let _ = storage.record_equity(mode, rk.pnl());
+                        }
+                        let _ = storage.snapshot_positions(&mark.positions, mark.unrealized_pnl);
+                    }
+                    _ = resolution_interval.tick() => {
+                        // Settle any positions whose markets have resolved on-chain.
+                        let open = backend.open_positions().await.unwrap_or_default();
+                        if !open.is_empty() {
+                            let condition_ids: Vec<String> =
+                                open.iter().map(|p| p.condition_id.clone()).collect();
+                            match hub_for_resolution
+                                .gamma
+                                .fetch_market_resolutions(&condition_ids)
+                                .await
+                            {
+                                Ok(resolutions) if !resolutions.is_empty() => {
+                                    backend.settle_resolved_markets(&resolutions);
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    warn!(error = %e, "resolution check failed");
+                                }
+                            }
+                        }
+                    }
                 }
-                let _ = storage.snapshot_positions(&mark.positions, mark.unrealized_pnl);
             }
         })
     };
@@ -262,6 +295,12 @@ async fn process_signal(
     risk: &Arc<RwLock<RiskEngine>>,
     signal: TradeSignal,
 ) -> Result<()> {
+    // Dedup: skip if we already hold a position in this market.
+    let existing = backend.open_positions().await.unwrap_or_default();
+    if existing.iter().any(|p| p.condition_id == signal.market.condition_id) {
+        return Ok(());
+    }
+
     let token_id = if signal.side == Side::No {
         signal.market.no_token_id.clone()
     } else {

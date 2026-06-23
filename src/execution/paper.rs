@@ -293,6 +293,58 @@ impl super::ExecutionBackend for PaperBackend {
     fn mark_and_settle(&self, exec_cfg: &ExecutionConfig) -> PortfolioMark {
         self.settle(exec_cfg)
     }
+
+    fn settle_resolved_markets(&self, resolutions: &HashMap<String, bool>) {
+        let mut closed_trades: Vec<TradeRecord> = Vec::new();
+        {
+            let mut state = self.state.write();
+            let to_close: Vec<String> = state
+                .positions
+                .keys()
+                .filter(|cid| resolutions.contains_key(*cid))
+                .cloned()
+                .collect();
+
+            for cond_id in to_close {
+                if let Some(pos) = state.positions.remove(&cond_id) {
+                    let no_won = resolutions[&cond_id];
+                    // NO resolution: 1.0 if NO won, 0.0 if YES won.
+                    let exit_price = if no_won { 1.0_f64 } else { 0.0_f64 };
+                    let realized = (exit_price - pos.avg_entry_price) * pos.size_shares;
+                    state.usdc_available += exit_price * pos.size_shares;
+                    state.realized_pnl += realized;
+                    tracing::info!(
+                        market = %cond_id,
+                        no_won,
+                        exit_price,
+                        realized,
+                        "position settled at resolution"
+                    );
+                    closed_trades.push(TradeRecord {
+                        id: None,
+                        ts: chrono::Utc::now(),
+                        mode: ExecutionMode::Paper,
+                        market_id: pos.condition_id.clone(),
+                        category: pos.category.clone(),
+                        underlying: pos.underlying.clone(),
+                        expiry: chrono::Utc::now(),
+                        side: pos.side,
+                        entry_price: pos.avg_entry_price,
+                        size_shares: pos.size_shares,
+                        source: pos.source.clone(),
+                        copy_wallet: pos.copy_wallet.clone(),
+                        exit_price: Some(exit_price),
+                        realized_pnl: Some(realized),
+                    });
+                }
+            }
+        }
+        for trade in &closed_trades {
+            if let Err(e) = self.storage.insert_trade(trade) {
+                tracing::warn!(error = %e, "failed to persist resolved trade");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -324,8 +376,8 @@ mod tests {
                 mode: ExecutionMode::Paper,
                 baseline_latency_ms: 1,
                 latency_jitter_ms: 0,
-                take_profit_price: 0.985,
-                stop_loss_price: 0.55,
+                take_profit_price: 0.99,
+                stop_loss_price: 0.05,
             },
             10_000.0,
             cache,
@@ -353,8 +405,8 @@ mod tests {
             mode: ExecutionMode::Paper,
             baseline_latency_ms: 1,
             latency_jitter_ms: 0,
-            take_profit_price: 0.985,
-            stop_loss_price: 0.55,
+            take_profit_price: 0.99,
+            stop_loss_price: 0.05,
         }
     }
 

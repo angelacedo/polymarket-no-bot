@@ -5,6 +5,9 @@
 mode = "paper"  # "paper" | "live"
 baseline_latency_ms = 50
 latency_jitter_ms = 30
+# Hold NO positions to resolution; only cut if price collapses > 95%.
+stop_loss_price = 0.05
+take_profit_price = 0.99
 
 [metrics]
 bind_addr = "127.0.0.1:8080"

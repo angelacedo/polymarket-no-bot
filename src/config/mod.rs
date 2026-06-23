@@ -43,11 +43,15 @@ pub struct ExecutionConfig {
 }
 
 fn default_take_profit_price() -> f64 {
-    0.985
+    // Close near full resolution value; actual resolution is handled by
+    // settle_resolved_markets() which settles at exactly 1.0 or 0.0.
+    0.99
 }
 
 fn default_stop_loss_price() -> f64 {
-    0.55
+    // Very low threshold — we want to hold NO positions to resolution.
+    // Only cut if price collapses dramatically (market pivoted against us).
+    0.05
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::RwLock;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info};
 
 use crate::config::BotConfig;
@@ -101,6 +101,7 @@ pub async fn run_strategy_loop(
     signal_tx: mpsc::Sender<TradeSignal>,
     scan_interval_secs: u64,
     markets_shared: Option<Arc<RwLock<HashMap<String, MarketMeta>>>>,
+    token_ids_tx: Option<watch::Sender<Vec<String>>>,
 ) {
     let cache = engine.hub.book_cache.clone();
     let mut scan_tick = tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
@@ -108,9 +109,24 @@ pub async fn run_strategy_loop(
     loop {
         tokio::select! {
             _ = scan_tick.tick() => {
-                if let Ok(_tokens) = engine.refresh_markets().await {
+                if let Ok(new_tokens) = engine.refresh_markets().await {
                     if let Some(ref shared) = markets_shared {
                         *shared.write() = engine.markets().clone();
+                    }
+                    // Push updated token list to the WS feed if it changed.
+                    if let Some(ref tx) = token_ids_tx {
+                        let changed = {
+                            let current = tx.borrow();
+                            let mut cur_sorted = current.clone();
+                            let mut new_sorted = new_tokens.clone();
+                            cur_sorted.sort_unstable();
+                            new_sorted.sort_unstable();
+                            cur_sorted != new_sorted
+                        };
+                        if changed {
+                            info!(tokens = new_tokens.len(), "market universe changed, updating WS subscriptions");
+                            let _ = tx.send(new_tokens);
+                        }
                     }
                     debug!(count = engine.markets().len(), "scheduled market scan");
                 }

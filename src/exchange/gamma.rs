@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
@@ -47,7 +49,61 @@ impl GammaClient {
         Ok(parsed)
     }
 
-    fn to_market_meta(&self, m: GammaMarket) -> Option<MarketMeta> {
+    /// Check whether any of the given condition IDs have resolved.
+    /// Returns a map of condition_id → `true` if NO won, `false` if NO lost.
+    /// Only resolved markets are included in the output.
+    pub async fn fetch_market_resolutions(
+        &self,
+        condition_ids: &[String],
+    ) -> Result<HashMap<String, bool>> {
+        if condition_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // Batch by chunks of 20 to stay within reasonable URL lengths.
+        let mut results = HashMap::new();
+        for chunk in condition_ids.chunks(20) {
+            let ids_param = chunk.join(",");
+            let url = format!(
+                "{}/markets?conditionIds={}&closed=true",
+                self.base_url, ids_param
+            );
+            let resp = match retry_get(&self.client, &url).await {
+                Ok(r) if r.status().is_success() => r,
+                Ok(r) => {
+                    tracing::warn!(status = %r.status(), "resolution check returned non-200");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "resolution check request failed");
+                    continue;
+                }
+            };
+            let markets: Vec<GammaMarket> = match resp.json().await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "resolution check json parse failed");
+                    continue;
+                }
+            };
+            for m in markets {
+                // Only include markets that are actually closed with a known outcome.
+                if m.closed.unwrap_or(false) {
+                    if let Some(outcome) = &m.winner_outcome {
+                        let cid = m
+                            .condition_id
+                            .clone()
+                            .unwrap_or_else(|| m.id.clone());
+                        // Gamma returns "No" or "no" when the NO token wins.
+                        let no_won = outcome.to_ascii_lowercase() == "no";
+                        results.insert(cid, no_won);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    pub(crate) fn to_market_meta(&self, m: GammaMarket) -> Option<MarketMeta> {
         if !m.enable_order_book.unwrap_or(false) {
             return None;
         }
@@ -64,11 +120,32 @@ impl GammaClient {
         let question = m.question.as_deref().unwrap_or("");
         let (category, underlying) = classify_market(question, m.tags.as_deref().unwrap_or(&[]));
 
+        // Validate YES/NO token order from the `outcomes` field.
+        // Gamma guarantees outcomes[i] matches clobTokenIds[i].
+        // If outcomes[0] starts with "No", the token order is inverted.
+        let (yes_token_id, no_token_id) = if m
+            .outcomes
+            .as_deref()
+            .and_then(|o| o.first())
+            .map(|s| s.to_ascii_lowercase().starts_with("no"))
+            .unwrap_or(false)
+        {
+            // Swapped: tokens[0] = NO, tokens[1] = YES
+            tracing::debug!(
+                question,
+                "swapping YES/NO token order based on outcomes field"
+            );
+            (tokens[1].clone(), tokens[0].clone())
+        } else {
+            // Normal: tokens[0] = YES, tokens[1] = NO
+            (tokens[0].clone(), tokens[1].clone())
+        };
+
         Some(MarketMeta {
             condition_id: m.condition_id.unwrap_or_else(|| m.id.clone()),
             question: m.question.unwrap_or_default(),
-            yes_token_id: tokens[0].clone(),
-            no_token_id: tokens[1].clone(),
+            yes_token_id,
+            no_token_id,
             category,
             underlying,
             end_date: end,
@@ -93,16 +170,43 @@ struct GammaMarket {
     condition_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_clob_token_ids")]
     clob_token_ids: Option<Vec<String>>,
+    /// `outcomes` mirrors the order of `clobTokenIds` — used to detect when
+    /// the API returns them in the unexpected [No, Yes] order.
+    #[serde(default, deserialize_with = "deserialize_outcomes")]
+    outcomes: Option<Vec<String>>,
     #[serde(default)]
     enable_order_book: Option<bool>,
     #[serde(default)]
     end_date: Option<String>,
     #[serde(default)]
     liquidity_num: Option<f64>,
+    /// True once the market has been resolved and settled.
+    #[serde(default)]
+    closed: Option<bool>,
+    /// The winning outcome label ("Yes" or "No"), populated after resolution.
+    #[serde(default)]
+    winner_outcome: Option<String>,
+}
+
+/// `outcomes` can arrive as a native JSON array or as a JSON-encoded string.
+fn deserialize_outcomes<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_string_or_array(deserializer)
 }
 
 /// Gamma returns `clobTokenIds` as a JSON-encoded string, not a native array.
 fn deserialize_clob_token_ids<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_string_or_array(deserializer)
+}
+
+/// Shared helper: deserializes a field that Gamma may send either as a native
+/// JSON array of strings or as a JSON-encoded string of an array.
+fn deserialize_string_or_array<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -136,34 +240,119 @@ fn parse_gamma_date(raw: &str) -> Option<DateTime<Utc>> {
         })
 }
 
-/// POLYMARKET_INTEGRATION: refine category mapping using Gamma tags
+/// Classify a market by category and primary underlying asset.
 pub fn classify_market(question: &str, tags: &[String]) -> (String, String) {
     let q = question.to_lowercase();
     let tag_str = tags.join(" ").to_lowercase();
+    let combined = format!("{q} {tag_str}");
 
-    let underlying = if q.contains("btc") || tag_str.contains("bitcoin") {
-        "BTC".to_string()
-    } else if q.contains("eth") || tag_str.contains("ethereum") {
-        "ETH".to_string()
-    } else if q.contains("sol") {
-        "SOL".to_string()
+    // --- Underlying asset ---
+    let underlying = if combined.contains("btc") || combined.contains("bitcoin") {
+        "BTC"
+    } else if combined.contains("eth") || combined.contains("ethereum") {
+        "ETH"
+    } else if combined.contains("sol") || combined.contains("solana") {
+        "SOL"
+    } else if combined.contains("xrp") || combined.contains("ripple") {
+        "XRP"
+    } else if combined.contains("doge") || combined.contains("dogecoin") {
+        "DOGE"
+    } else if combined.contains("trump") || combined.contains("biden") || combined.contains("harris") {
+        "US_POL"
+    } else if combined.contains("fed") || combined.contains("fomc") || combined.contains("powell") {
+        "FED"
+    } else if combined.contains("s&p") || combined.contains("sp500") || combined.contains("nasdaq") {
+        "EQUITIES"
+    } else if combined.contains("oil") || combined.contains("crude") || combined.contains("wti") {
+        "OIL"
+    } else if combined.contains("gold") || combined.contains("xau") {
+        "GOLD"
     } else {
-        "OTHER".to_string()
+        "OTHER"
     };
 
-    let category = if tag_str.contains("crypto") || q.contains("bitcoin") || q.contains("btc") || q.contains("ethereum") {
-        "crypto".to_string()
-    } else if tag_str.contains("politic") || q.contains("election") || q.contains("president") {
-        "politics".to_string()
-    } else if tag_str.contains("macro") || q.contains("fed") || q.contains("cpi") || q.contains("gdp") {
-        "macro".to_string()
-    } else if tag_str.contains("sport") {
-        "sports".to_string()
+    // --- Category ---
+    let category = if tag_str.contains("crypto")
+        || combined.contains("bitcoin")
+        || combined.contains("btc")
+        || combined.contains("ethereum")
+        || combined.contains("eth ")
+        || combined.contains("solana")
+        || combined.contains("xrp")
+        || combined.contains("doge")
+        || combined.contains("defi")
+        || combined.contains("nft")
+        || combined.contains("blockchain")
+        || combined.contains("token")
+        || combined.contains("altcoin")
+    {
+        "crypto"
+    } else if tag_str.contains("politic")
+        || tag_str.contains("election")
+        || combined.contains("election")
+        || combined.contains("president")
+        || combined.contains("senate")
+        || combined.contains("congress")
+        || combined.contains("democrat")
+        || combined.contains("republican")
+        || combined.contains("trump")
+        || combined.contains("biden")
+        || combined.contains("harris")
+        || combined.contains("elon musk")
+        || combined.contains("white house")
+    {
+        "politics"
+    } else if tag_str.contains("macro")
+        || tag_str.contains("economy")
+        || combined.contains("fed ")
+        || combined.contains("fomc")
+        || combined.contains("cpi")
+        || combined.contains("inflation")
+        || combined.contains("gdp")
+        || combined.contains("recession")
+        || combined.contains("interest rate")
+        || combined.contains("treasury")
+        || combined.contains("s&p")
+        || combined.contains("sp500")
+        || combined.contains("nasdaq")
+        || combined.contains("oil")
+        || combined.contains("gold")
+    {
+        "macro"
+    } else if tag_str.contains("sport")
+        || tag_str.contains("nfl")
+        || tag_str.contains("nba")
+        || tag_str.contains("mlb")
+        || tag_str.contains("soccer")
+        || tag_str.contains("football")
+        || tag_str.contains("tennis")
+        || tag_str.contains("ufc")
+        || combined.contains("super bowl")
+        || combined.contains("world cup")
+        || combined.contains("championship")
+        || combined.contains("playoff")
+    {
+        "sports"
+    } else if tag_str.contains("entertain")
+        || tag_str.contains("celebrity")
+        || tag_str.contains("award")
+        || combined.contains("oscar")
+        || combined.contains("grammy")
+        || combined.contains("emmy")
+        || combined.contains("taylor swift")
+    {
+        "entertainment"
+    } else if combined.contains("climate")
+        || combined.contains("weather")
+        || combined.contains("hurricane")
+        || combined.contains("earthquake")
+    {
+        "science"
     } else {
-        "other".to_string()
+        "other"
     };
 
-    (category, underlying)
+    (category.to_string(), underlying.to_string())
 }
 
 #[cfg(test)]
@@ -184,6 +373,7 @@ mod tests {
             "question": "Will BTC exceed 100k?",
             "conditionId": "0xabc",
             "clobTokenIds": "[\"111\", \"222\"]",
+            "outcomes": "[\"Yes\", \"No\"]",
             "enableOrderBook": true,
             "endDate": "2026-07-31T12:00:00Z",
             "liquidityNum": 17572.66
@@ -204,8 +394,35 @@ mod tests {
             market_discovery_limit: 200,
         });
         let meta = client.to_market_meta(market).expect("valid market");
+        // outcomes[0]="Yes" → tokens[0]=YES, tokens[1]=NO (normal order)
         assert_eq!(meta.yes_token_id, "111");
         assert_eq!(meta.no_token_id, "222");
         assert_eq!(meta.category, "crypto");
+    }
+
+    #[test]
+    fn swaps_yes_no_when_outcomes_inverted() {
+        let raw = r#"{
+            "id": "540818",
+            "question": "Will it rain tomorrow?",
+            "conditionId": "0xdef",
+            "clobTokenIds": "[\"aaa\", \"bbb\"]",
+            "outcomes": "[\"No\", \"Yes\"]",
+            "enableOrderBook": true,
+            "endDate": "2026-07-31T12:00:00Z",
+            "liquidityNum": 5000.0
+        }"#;
+        let market: GammaMarket = serde_json::from_str(raw).unwrap();
+        let client = GammaClient::new(&ExchangeConfig {
+            gamma_base_url: "https://gamma-api.polymarket.com".into(),
+            data_api_base_url: String::new(),
+            clob_host: String::new(),
+            chain_id: 137,
+            market_discovery_limit: 200,
+        });
+        let meta = client.to_market_meta(market).expect("valid market");
+        // outcomes[0]="No" → tokens[0] is actually the NO token; swap
+        assert_eq!(meta.yes_token_id, "bbb");
+        assert_eq!(meta.no_token_id, "aaa");
     }
 }

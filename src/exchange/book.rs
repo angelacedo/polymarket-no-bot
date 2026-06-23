@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
@@ -40,20 +40,28 @@ impl BookCache {
 }
 
 /// WebSocket orderbook feed with automatic reconnection.
+/// Accepts a `watch::Receiver<Vec<String>>` so the subscription list can be
+/// refreshed at runtime without restarting the process.  Whenever the sender
+/// pushes a new token list the current WS session is closed and a new one is
+/// opened with the updated subscriptions.
 pub fn spawn_orderbook_feed(
-    token_ids: Vec<String>,
+    mut token_ids_rx: watch::Receiver<Vec<String>>,
     cache: BookCache,
     tx: mpsc::Sender<BookUpdate>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            let token_ids = token_ids_rx.borrow_and_update().clone();
             if token_ids.is_empty() {
                 tokio::time::sleep(Duration::from_secs(5)).await;
+                // Block until we get at least one token
+                let _ = token_ids_rx.changed().await;
                 continue;
             }
 
-            match run_ws_session(&token_ids, &cache, &tx).await {
-                Ok(()) => warn!("orderbook websocket session ended, reconnecting"),
+            match run_ws_session(&token_ids, &cache, &tx, &mut token_ids_rx).await {
+                Ok(true) => info!(tokens = token_ids.len(), "token list changed, reconnecting WS"),
+                Ok(false) => warn!("orderbook websocket session ended, reconnecting"),
                 Err(e) => warn!(error = %e, "orderbook websocket error, reconnecting"),
             }
 
@@ -62,11 +70,16 @@ pub fn spawn_orderbook_feed(
     })
 }
 
+/// Run one WS session.  Returns:
+/// - `Ok(true)`  → token list changed, caller should reconnect with new list
+/// - `Ok(false)` → session ended normally
+/// - `Err(_)`    → transport/protocol error
 async fn run_ws_session(
     token_ids: &[String],
     cache: &BookCache,
     tx: &mpsc::Sender<BookUpdate>,
-) -> anyhow::Result<()> {
+    token_ids_rx: &mut watch::Receiver<Vec<String>>,
+) -> anyhow::Result<bool> {
     let (ws_stream, _) = connect_async(WS_URL).await?;
     let (mut write, mut read) = ws_stream.split();
 
@@ -102,16 +115,18 @@ async fn run_ws_session(
                     Some(Ok(Message::Ping(payload))) => {
                         write.send(Message::Pong(payload)).await?;
                     }
-                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Close(_))) => return Ok(false),
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
-                    None => break,
+                    None => return Ok(false),
                 }
+            }
+            // Reconnect when the caller pushes a new token list.
+            _ = token_ids_rx.changed() => {
+                return Ok(true);
             }
         }
     }
-
-    Ok(())
 }
 
 fn handle_ws_message(value: &Value, cache: &BookCache, tx: &mpsc::Sender<BookUpdate>) {

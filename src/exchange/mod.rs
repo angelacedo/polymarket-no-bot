@@ -6,7 +6,7 @@ pub(crate) mod retry;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub use book::{BookCache, spawn_orderbook_feed};
 pub use data_api::DataApiClient;
@@ -36,11 +36,11 @@ impl ExchangeHub {
 
     pub fn start_book_feed(
         self: &Arc<Self>,
-        token_ids: Vec<String>,
+        token_ids_rx: watch::Receiver<Vec<String>>,
         tx: mpsc::Sender<BookUpdate>,
     ) -> tokio::task::JoinHandle<()> {
         let cache = self.book_cache.clone();
-        spawn_orderbook_feed(token_ids, cache, tx)
+        spawn_orderbook_feed(token_ids_rx, cache, tx)
     }
 
     pub async fn fetch_wallet_trades(

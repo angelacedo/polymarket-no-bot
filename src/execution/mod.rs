@@ -4,6 +4,8 @@ mod paper;
 use async_trait::async_trait;
 use std::sync::Arc;
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 
 pub use live::LiveBackend;
@@ -35,6 +37,11 @@ pub trait ExecutionBackend: Send + Sync {
     fn mark_and_settle(&self, _exec_cfg: &ExecutionConfig) -> PortfolioMark {
         PortfolioMark::default()
     }
+
+    /// Settle positions whose markets have resolved on-chain.
+    /// `resolutions` maps condition_id → true if NO won (position pays out at
+    /// $1), false if NO lost (position goes to $0).
+    fn settle_resolved_markets(&self, _resolutions: &HashMap<String, bool>) {}
 }
 
 pub enum Backend {
@@ -83,6 +90,13 @@ impl ExecutionBackend for Backend {
         match self {
             Self::Live(b) => b.mark_and_settle(exec_cfg),
             Self::Paper(b) => b.mark_and_settle(exec_cfg),
+        }
+    }
+
+    fn settle_resolved_markets(&self, resolutions: &HashMap<String, bool>) {
+        match self {
+            Self::Live(b) => b.settle_resolved_markets(resolutions),
+            Self::Paper(b) => b.settle_resolved_markets(resolutions),
         }
     }
 }
