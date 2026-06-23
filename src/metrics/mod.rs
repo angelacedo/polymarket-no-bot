@@ -43,7 +43,9 @@ pub fn build_state(
     risk: Arc<RwLock<RiskEngine>>,
     backend: Arc<dyn ExecutionBackend>,
 ) -> AppState {
-    let admin_reset_token = std::env::var("ADMIN_RESET_TOKEN").ok();
+    let admin_reset_token = std::env::var("ADMIN_RESET_TOKEN")
+        .ok()
+        .or_else(|| Some("polybot-reset-secret".to_string()));
     AppState {
         storage,
         registry,
