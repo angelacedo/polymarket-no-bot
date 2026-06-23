@@ -32,6 +32,22 @@ jobs:
             ghcr.io/angelacedo/polymarket-no-bot:${{ github.sha }}
 
       - name: Publish GHCR package (pullable without auth)
-        run: gh api --method PATCH /user/packages/container/polymarket-no-bot -f visibility=public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pkgs = await github.rest.packages.listPackagesForAuthenticatedUser({
+              package_type: 'container',
+              per_page: 100,
+            });
+            const pkg = pkgs.data.find((p) => p.name === 'polymarket-no-bot')
+              ?? pkgs.data.find((p) => p.name.includes('polymarket'));
+            if (!pkg) {
+              core.setFailed('GHCR package polymarket-no-bot not found');
+              return;
+            }
+            core.info(`Publishing package ${pkg.name} as public`);
+            await github.rest.packages.setPackageVisibilityForAuthenticatedUser({
+              package_type: 'container',
+              package_name: pkg.name,
+              visibility: 'public',
+            });
