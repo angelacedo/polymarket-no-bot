@@ -116,11 +116,8 @@ async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse 
     }
 }
 
-async fn dashboard_page(State(state): State<AppState>) -> impl IntoResponse {
-    match build_snapshot(&state) {
-        Ok(s) => Html(super::dashboard::render(&s)),
-        Err(e) => Html(format!("<h1>Error</h1><p>{e}</p>")),
-    }
+async fn dashboard_page() -> impl IntoResponse {
+    Html(super::dashboard::page())
 }
 
 fn build_snapshot(state: &AppState) -> anyhow::Result<StatusSnapshot> {
