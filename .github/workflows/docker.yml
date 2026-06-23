@@ -30,3 +30,8 @@ jobs:
           tags: |
             ghcr.io/angelacedo/polymarket-no-bot:latest
             ghcr.io/angelacedo/polymarket-no-bot:${{ github.sha }}
+
+      - name: Publish GHCR package (pullable without auth)
+        run: gh api --method PATCH /user/packages/container/polymarket-no-bot -f visibility=public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

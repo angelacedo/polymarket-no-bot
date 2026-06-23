@@ -1,9 +1,6 @@
 services:
   polybot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: polymarket-no-bot:latest
+    image: ghcr.io/angelacedo/polymarket-no-bot:latest
     container_name: polymarket-no-bot
     restart: unless-stopped
     expose:
