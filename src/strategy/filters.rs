@@ -87,6 +87,7 @@ mod tests {
         MarketMeta {
             condition_id: "c1".into(),
             question: "test".into(),
+            slug: "test-market".into(),
             yes_token_id: "y1".into(),
             no_token_id: "n1".into(),
             category: "crypto".into(),

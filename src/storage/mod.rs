@@ -9,8 +9,27 @@ use rusqlite::{Connection, params};
 
 use crate::types::{
     ExecutionMode, OrderRequest, OrderResult, OrderStatus, PnlSnapshot, Position, Side,
-    TuningAuditRecord, TradeRecord,
+    TradeView, TuningAuditRecord, TradeRecord,
 };
+
+const POLYMARKET_EVENT_BASE: &str = "https://polymarket.com/event/";
+
+/// Apply incremental, idempotent schema migrations on top of INIT_SQL.
+fn migrate(conn: &Connection) -> Result<()> {
+    // Add markets_cache.slug if it doesn't exist yet (older databases).
+    let has_slug: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('markets_cache') WHERE name = 'slug'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_slug {
+        conn.execute("ALTER TABLE markets_cache ADD COLUMN slug TEXT", [])?;
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct Storage {
@@ -24,6 +43,7 @@ impl Storage {
         }
         let conn = Connection::open(path).with_context(|| format!("open db {}", path.display()))?;
         conn.execute_batch(INIT_SQL)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -32,6 +52,7 @@ impl Storage {
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(INIT_SQL)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -97,10 +118,12 @@ impl Storage {
         Ok(conn.last_insert_rowid())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_market_cache(
         &self,
         condition_id: &str,
         question: &str,
+        slug: &str,
         category: &str,
         underlying: &str,
         end_date: DateTime<Utc>,
@@ -109,15 +132,16 @@ impl Storage {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO markets_cache (condition_id, question, category, underlying, end_date, yes_token, no_token, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+            "INSERT INTO markets_cache (condition_id, question, slug, category, underlying, end_date, yes_token, no_token, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
              ON CONFLICT(condition_id) DO UPDATE SET
-               question=excluded.question, category=excluded.category, underlying=excluded.underlying,
+               question=excluded.question, slug=excluded.slug, category=excluded.category, underlying=excluded.underlying,
                end_date=excluded.end_date, yes_token=excluded.yes_token, no_token=excluded.no_token,
                updated_at=excluded.updated_at",
             params![
                 condition_id,
                 question,
+                slug,
                 category,
                 underlying,
                 end_date.to_rfc3339(),
@@ -214,6 +238,50 @@ impl Storage {
                 copy_wallet: row.get(11)?,
                 exit_price: row.get(12)?,
                 realized_pnl: row.get(13)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Recent trades joined with cached market metadata (question + slug) so the
+    /// dashboard can show readable names and link to the Polymarket market.
+    pub fn recent_trades_enriched(&self, limit: usize) -> Result<Vec<TradeView>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.ts, t.mode, t.market_id, t.category, t.underlying, t.expiry, t.side,
+                    t.entry_price, t.size_shares, t.source, t.copy_wallet, t.exit_price, t.realized_pnl,
+                    m.question, m.slug
+             FROM trades t
+             LEFT JOIN markets_cache m ON t.market_id = m.condition_id
+             ORDER BY t.ts DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| {
+            let trade = TradeRecord {
+                id: Some(row.get(0)?),
+                ts: parse_ts(row.get::<_, String>(1)?),
+                mode: parse_mode(row.get::<_, String>(2)?),
+                market_id: row.get(3)?,
+                category: row.get(4)?,
+                underlying: row.get(5)?,
+                expiry: parse_ts(row.get::<_, String>(6)?),
+                side: parse_side(row.get::<_, String>(7)?),
+                entry_price: row.get(8)?,
+                size_shares: row.get(9)?,
+                source: row.get(10)?,
+                copy_wallet: row.get(11)?,
+                exit_price: row.get(12)?,
+                realized_pnl: row.get(13)?,
+            };
+            let question: Option<String> = row.get(14)?;
+            let slug: Option<String> = row.get(15)?;
+            let market_url = slug
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("{POLYMARKET_EVENT_BASE}{s}"));
+            Ok(TradeView {
+                trade,
+                market_name: question.filter(|q| !q.is_empty()),
+                market_url,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

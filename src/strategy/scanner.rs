@@ -50,6 +50,7 @@ impl StrategyEngine {
             self.storage.upsert_market_cache(
                 &m.condition_id,
                 &m.question,
+                &m.slug,
                 &m.category,
                 &m.underlying,
                 m.end_date,

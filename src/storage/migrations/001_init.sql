@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS markets_cache (
     end_date TEXT NOT NULL,
     yes_token TEXT NOT NULL,
     no_token TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    slug TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);

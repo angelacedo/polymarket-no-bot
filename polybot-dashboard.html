@@ -210,6 +210,14 @@
       font-size: 13px; font-weight: 500; margin-bottom: 4px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
+    a.trade-market.link {
+      display: inline-flex; align-items: center; gap: 5px;
+      color: var(--text); text-decoration: none; max-width: 100%;
+      transition: color 120ms;
+    }
+    a.trade-market.link:hover { color: var(--emerald); }
+    a.trade-market.link .ext { flex-shrink: 0; opacity: 0.5; }
+    a.trade-market.link:hover .ext { opacity: 1; }
     .trade-meta {
       display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--text-muted);
     }
@@ -436,7 +444,9 @@
     return {
       id: t.id ?? i,
       mode: (t.mode || 'paper').toString().toLowerCase(),
-      market: t.market_id || t.market_name || 'Unknown',
+      market: t.market_name || t.market_id || 'Unknown',
+      marketId: t.market_id || '',
+      marketUrl: t.market_url || null,
       category: t.category || 'other',
       underlying: t.underlying || '—',
       entry: t.entry_price,
@@ -475,6 +485,8 @@
       const size = 60 + i * 8;
       return normalizeTrade({
         market_id: `0x${(1000+i).toString(16).padStart(8,'0')}`,
+        market_name: `Demo market #${i} — will outcome ${i} happen?`,
+        market_url: 'https://polymarket.com/event/demo-market-' + i,
         category: ['crypto','macro','politics'][i%3],
         underlying: ['BTC','ETH','SOL'][i%3],
         entry_price: entry,
@@ -599,15 +611,26 @@
       : '<div class="empty">No exposure data</div>';
   }
 
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  }
+
   function tradeRow(t) {
     const rowCls = t.result === 'Won' ? 'win' : t.result === 'Lost' ? 'loss' : t.result === 'Open' ? 'open' : 'flat';
     const tagCls = t.result === 'Won' ? 'tag-won' : t.result === 'Lost' ? 'tag-lost' : t.result === 'Open' ? 'tag-open' : 'tag-flat';
+    const label = esc(fmt.trunc(t.market, 52));
+    const title = esc(t.market);
+    const marketEl = t.marketUrl
+      ? `<a class="trade-market link" href="${esc(t.marketUrl)}" target="_blank" rel="noopener" title="${title} — open on Polymarket">${label}<svg class="ext" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h5"/></svg></a>`
+      : `<div class="trade-market" title="${title}">${label}</div>`;
+    const idChip = t.marketId ? `<code title="${esc(t.marketId)}">${esc(fmt.trunc(t.marketId, 12))}</code>` : '';
     return `<div class="trade-item ${rowCls}">
       <div class="trade-main">
-        <div class="trade-market" title="${t.market}">${fmt.trunc(t.market, 42)}</div>
+        ${marketEl}
         <div class="trade-meta">
           <span class="tag ${tagCls}">${t.result}</span>
-          <span>${t.category}</span>
+          <span>${esc(t.category)}</span>
+          ${idChip}
           <span>Entry <code>${t.entry?.toFixed(4)}</code></span>
           ${t.closed ? `<span>Exit <code>${t.exit?.toFixed(4)}</code></span>` : ''}
           <span>${t.size?.toFixed(1)} sh</span>

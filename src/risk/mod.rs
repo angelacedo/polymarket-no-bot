@@ -276,6 +276,7 @@ mod tests {
         MarketMeta {
             condition_id: "cond-1".into(),
             question: "BTC above 100k?".into(),
+            slug: "btc-above-100k".into(),
             yes_token_id: "yes-1".into(),
             no_token_id: "no-1".into(),
             category: "crypto".into(),

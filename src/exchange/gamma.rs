@@ -51,7 +51,11 @@ impl GammaClient {
 
     /// Check whether any of the given condition IDs have resolved.
     /// Returns a map of condition_id → `true` if NO won, `false` if NO lost.
-    /// Only resolved markets are included in the output.
+    /// Only resolved markets with a decisive outcome are included.
+    ///
+    /// Gamma does not expose a `winnerOutcome` field; resolution is encoded in
+    /// `outcomePrices`, which mirrors the order of `outcomes`. A resolved market
+    /// has prices like `["0","1"]` (NO won) or `["1","0"]` (YES won).
     pub async fn fetch_market_resolutions(
         &self,
         condition_ids: &[String],
@@ -86,17 +90,12 @@ impl GammaClient {
                 }
             };
             for m in markets {
-                // Only include markets that are actually closed with a known outcome.
-                if m.closed.unwrap_or(false) {
-                    if let Some(outcome) = &m.winner_outcome {
-                        let cid = m
-                            .condition_id
-                            .clone()
-                            .unwrap_or_else(|| m.id.clone());
-                        // Gamma returns "No" or "no" when the NO token wins.
-                        let no_won = outcome.to_ascii_lowercase() == "no";
-                        results.insert(cid, no_won);
-                    }
+                if !m.closed.unwrap_or(false) {
+                    continue;
+                }
+                let cid = m.condition_id.clone().unwrap_or_else(|| m.id.clone());
+                if let Some(no_won) = resolved_no_outcome(&m) {
+                    results.insert(cid, no_won);
                 }
             }
         }
@@ -144,6 +143,7 @@ impl GammaClient {
         Some(MarketMeta {
             condition_id: m.condition_id.unwrap_or_else(|| m.id.clone()),
             question: m.question.unwrap_or_default(),
+            slug: m.slug.unwrap_or_default(),
             yes_token_id,
             no_token_id,
             category,
@@ -159,11 +159,39 @@ async fn retry_get(client: &Client, url: &str) -> Result<reqwest::Response> {
     shared_retry_get(client, url).await
 }
 
+/// Determine the NO-side resolution from a closed market's `outcomes` and
+/// `outcomePrices`. Returns:
+/// - `Some(true)`  → NO won (NO price ≈ 1.0)
+/// - `Some(false)` → NO lost (NO price ≈ 0.0)
+/// - `None`        → indecisive / voided (e.g. prices `["0","0"]`) or missing data
+fn resolved_no_outcome(m: &GammaMarket) -> Option<bool> {
+    let outcomes = m.outcomes.as_ref()?;
+    let prices = m.outcome_prices.as_ref()?;
+    if outcomes.len() != prices.len() || outcomes.is_empty() {
+        return None;
+    }
+    let no_idx = outcomes
+        .iter()
+        .position(|o| o.eq_ignore_ascii_case("no"))?;
+    let parsed: Vec<f64> = prices.iter().map(|p| p.parse().unwrap_or(0.0)).collect();
+
+    // A decisive resolution has exactly one winning outcome priced ≈ 1.0.
+    // Voided/invalid markets show e.g. ["0","0"] and must be skipped.
+    let has_decisive_winner = parsed.iter().any(|&p| p >= 0.99);
+    if !has_decisive_winner {
+        return None;
+    }
+    Some(parsed[no_idx] >= 0.99)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GammaMarket {
     id: String,
     question: Option<String>,
+    /// URL slug used to build the public Polymarket market link.
+    #[serde(default)]
+    slug: Option<String>,
     #[serde(default)]
     tags: Option<Vec<String>>,
     #[serde(default)]
@@ -174,6 +202,10 @@ struct GammaMarket {
     /// the API returns them in the unexpected [No, Yes] order.
     #[serde(default, deserialize_with = "deserialize_outcomes")]
     outcomes: Option<Vec<String>>,
+    /// `outcomePrices` mirrors `outcomes`; on a resolved market the winning
+    /// outcome is 1.0 and the loser 0.0.
+    #[serde(default, deserialize_with = "deserialize_outcomes")]
+    outcome_prices: Option<Vec<String>>,
     #[serde(default)]
     enable_order_book: Option<bool>,
     #[serde(default)]
@@ -183,9 +215,6 @@ struct GammaMarket {
     /// True once the market has been resolved and settled.
     #[serde(default)]
     closed: Option<bool>,
-    /// The winning outcome label ("Yes" or "No"), populated after resolution.
-    #[serde(default)]
-    winner_outcome: Option<String>,
 }
 
 /// `outcomes` can arrive as a native JSON array or as a JSON-encoded string.
@@ -371,6 +400,7 @@ mod tests {
         let raw = r#"{
             "id": "540817",
             "question": "Will BTC exceed 100k?",
+            "slug": "will-btc-exceed-100k",
             "conditionId": "0xabc",
             "clobTokenIds": "[\"111\", \"222\"]",
             "outcomes": "[\"Yes\", \"No\"]",
@@ -398,6 +428,34 @@ mod tests {
         assert_eq!(meta.yes_token_id, "111");
         assert_eq!(meta.no_token_id, "222");
         assert_eq!(meta.category, "crypto");
+        assert_eq!(meta.slug, "will-btc-exceed-100k");
+    }
+
+    #[test]
+    fn detects_no_resolution_from_outcome_prices() {
+        // NO won: outcomes=[Yes,No], prices=[0,1]
+        let raw_no_won = r#"{
+            "id": "1", "conditionId": "0x1", "closed": true,
+            "outcomes": "[\"Yes\", \"No\"]", "outcomePrices": "[\"0\", \"1\"]"
+        }"#;
+        let m: GammaMarket = serde_json::from_str(raw_no_won).unwrap();
+        assert_eq!(resolved_no_outcome(&m), Some(true));
+
+        // YES won: prices=[1,0]
+        let raw_yes_won = r#"{
+            "id": "2", "conditionId": "0x2", "closed": true,
+            "outcomes": "[\"Yes\", \"No\"]", "outcomePrices": "[\"1\", \"0\"]"
+        }"#;
+        let m: GammaMarket = serde_json::from_str(raw_yes_won).unwrap();
+        assert_eq!(resolved_no_outcome(&m), Some(false));
+
+        // Voided / indecisive: prices=[0,0]
+        let raw_void = r#"{
+            "id": "3", "conditionId": "0x3", "closed": true,
+            "outcomes": "[\"Yes\", \"No\"]", "outcomePrices": "[\"0\", \"0\"]"
+        }"#;
+        let m: GammaMarket = serde_json::from_str(raw_void).unwrap();
+        assert_eq!(resolved_no_outcome(&m), None);
     }
 
     #[test]

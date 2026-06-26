@@ -60,6 +60,9 @@ impl SignalSource {
 pub struct MarketMeta {
     pub condition_id: String,
     pub question: String,
+    /// Polymarket URL slug (used to build a public market link).
+    #[serde(default)]
+    pub slug: String,
     pub yes_token_id: String,
     pub no_token_id: String,
     pub category: String,
@@ -218,6 +221,17 @@ pub struct TradeRecord {
     pub copy_wallet: Option<String>,
     pub exit_price: Option<f64>,
     pub realized_pnl: Option<f64>,
+}
+
+/// A trade enriched with human-readable market metadata for the dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeView {
+    #[serde(flatten)]
+    pub trade: TradeRecord,
+    /// Human-readable market question (e.g. "Will BTC exceed 100k?").
+    pub market_name: Option<String>,
+    /// Public Polymarket link to the market, if a slug is known.
+    pub market_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]

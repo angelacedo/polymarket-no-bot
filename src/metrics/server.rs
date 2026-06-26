@@ -15,7 +15,7 @@ use tracing::info;
 use crate::execution::ExecutionBackend;
 use crate::risk::RiskEngine;
 use crate::storage::Storage;
-use crate::types::{ExecutionMode, LatencyTracker, TuningAuditRecord, TradeRecord};
+use crate::types::{ExecutionMode, LatencyTracker, TradeView, TuningAuditRecord};
 
 use super::MetricsRegistry;
 
@@ -39,7 +39,7 @@ pub struct StatusSnapshot {
     pub latency_p50_decision_ms: u64,
     pub latency_p99_decision_ms: u64,
     pub latency_p50_fill_ms: u64,
-    pub recent_trades: Vec<TradeRecord>,
+    pub recent_trades: Vec<TradeView>,
     pub recent_tuning_events: Vec<TuningAuditRecord>,
 }
 
@@ -180,7 +180,7 @@ fn build_snapshot(state: &AppState) -> anyhow::Result<StatusSnapshot> {
     let risk = state.risk.read();
     let exposure = risk.exposure().clone();
     let lat = state.registry.latency.read();
-    let recent_trades = state.storage.recent_trades(20)?;
+    let recent_trades = state.storage.recent_trades_enriched(20)?;
     let recent_tuning = state.storage.recent_tuning(10)?;
     let open_positions = state.storage.open_position_count().unwrap_or(0);
 
