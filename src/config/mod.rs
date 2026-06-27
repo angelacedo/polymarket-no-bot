@@ -26,6 +26,8 @@ pub struct EffectiveConfigOverlay {
     #[serde(default)]
     pub min_time_to_expiry_days: Option<u32>,
     #[serde(default)]
+    pub max_time_to_expiry_days: Option<f64>,
+    #[serde(default)]
     pub wallet_scale_factors: std::collections::HashMap<String, f64>,
 }
 
@@ -179,6 +181,12 @@ impl BotConfig {
                 bail!("max_time_to_expiry_days must be >= min_time_to_expiry_days");
             }
         }
+        // Validate overlay values if present
+        if let Some(days) = self.effective.min_time_to_expiry_days {
+            if days == 0 {
+                bail!("effective.min_time_to_expiry_days must be >= 1 when set via overlay");
+            }
+        }
         Ok(())
     }
 
@@ -195,7 +203,7 @@ impl BotConfig {
     }
 
     pub fn effective_max_time_to_expiry_days(&self) -> Option<f64> {
-        self.risk.max_time_to_expiry_days
+        self.effective.max_time_to_expiry_days.or(self.risk.max_time_to_expiry_days)
     }
 
     pub fn effective_wallet_scale(&self, address: &str, base: f64) -> f64 {

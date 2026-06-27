@@ -12,8 +12,6 @@ use crate::storage::Storage;
 use crate::strategy::scan_market;
 use crate::types::{BookUpdate, MarketMeta, TradeSignal};
 
-const REFRESH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-
 pub struct StrategyEngine {
     config: BotConfig,
     hub: Arc<ExchangeHub>,
@@ -36,8 +34,9 @@ impl StrategyEngine {
     }
 
     pub async fn refresh_markets(&mut self) -> anyhow::Result<Vec<String>> {
+        let ttl = std::time::Duration::from_secs(self.config.strategy.scan_interval_secs.max(60));
         if let Some(last) = self.last_refresh {
-            if last.elapsed() < REFRESH_CACHE_TTL {
+            if last.elapsed() < ttl {
                 debug!("market universe cache hit, skipping refresh");
                 return Ok(self.cached_token_ids.clone());
             }

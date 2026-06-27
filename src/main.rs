@@ -167,7 +167,7 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
         let markets = markets_shared.clone();
         tokio::spawn(async move {
             run_copytrade_loop(cfg, hub, markets, copy_tx).await;
-        });
+        })
     };
 
     let learning_handle = {
@@ -175,7 +175,7 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
         let storage = storage.clone();
         tokio::spawn(async move {
             run_learning_loop(cfg, storage, config_tx).await;
-        });
+        })
     };
 
     let metrics_state = build_state(storage.clone(), registry.clone(), risk.clone(), backend.clone());
@@ -185,7 +185,7 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
             if let Err(e) = server.serve(metrics_state).await {
                 tracing::error!(error = %e, "metrics server failed");
             }
-        });
+        })
     };
 
     let execution_handle = {
@@ -279,12 +279,12 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
 
     tokio::signal::ctrl_c().await?;
     info!("shutdown signal received");
-    drop(execution_handle);
-    drop(strategy_handle);
-    drop(copy_handle);
-    drop(learning_handle);
-    drop(metrics_handle);
-    drop(risk_monitor);
+    execution_handle.abort();
+    strategy_handle.abort();
+    copy_handle.abort();
+    learning_handle.abort();
+    metrics_handle.abort();
+    risk_monitor.abort();
     Ok(())
 }
 

@@ -32,6 +32,9 @@ pub fn apply_filters(
     // Fractional days so sub-day (hourly / minute) markets are handled
     // precisely instead of being truncated to 0 by integer-day arithmetic.
     let days_left = (market.end_date - Utc::now()).num_seconds() as f64 / 86_400.0;
+    if days_left < 0.0 {
+        return Err(FilterReject::ExpiryTooSoon);
+    }
     if days_left < config.effective_min_time_to_expiry_days() as f64 {
         return Err(FilterReject::ExpiryTooSoon);
     }

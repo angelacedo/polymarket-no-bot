@@ -287,6 +287,20 @@
     }
     .demo-banner.show { display: block; }
 
+    .error-banner {
+      display: none; padding: 10px 28px; background: rgba(244,114,138,0.10);
+      border-bottom: 1px solid rgba(244,114,138,0.25); font-size: 12px; color: var(--rose);
+      align-items: center; gap: 12px;
+    }
+    .error-banner.show { display: flex; }
+    .error-banner button {
+      font-family: var(--font); font-size: 11px; font-weight: 600;
+      padding: 4px 14px; border-radius: 6px; border: 1px solid rgba(244,114,138,0.3);
+      background: rgba(244,114,138,0.12); color: var(--rose); cursor: pointer;
+      transition: 150ms;
+    }
+    .error-banner button:hover { background: rgba(244,114,138,0.22); }
+
     .section { display: none; }
     .section.active { display: block; }
 
@@ -305,6 +319,10 @@
 </head>
 <body>
   <div class="demo-banner" id="demoBanner">Demo mode — API unreachable. Showing simulated intelligence data.</div>
+  <div class="error-banner" id="errorBanner">
+    <span id="errorText">Backend no disponible</span>
+    <button id="retryBtn" style="display:none">Reintentar</button>
+  </div>
 
   <div class="shell">
     <nav class="rail" aria-label="Main">
@@ -420,6 +438,9 @@
   let equityHistory = [];
   let tradeFilter = 'closed';
   let overviewFilter = 'closed';
+  let failCount = 0;
+  let lastSuccessTime = null;
+  let pollTimer = null;
 
   const $ = id => document.getElementById(id);
   const fmt = {
@@ -529,6 +550,47 @@
       demo = true;
       return demoData();
     }
+  }
+
+  async function fetchStatusLive() {
+    const r = await fetch(`${API}/api/status`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) throw new Error('bad status');
+    const j = await r.json();
+    j._trades = (j.recent_trades || []).map(normalizeTrade);
+    return j;
+  }
+
+  function updateErrorBanner(ok) {
+    const banner = $('errorBanner');
+    const retryBtn = $('retryBtn');
+    const errorText = $('errorText');
+    if (ok) {
+      failCount = 0;
+      lastSuccessTime = new Date();
+      banner.classList.remove('show');
+      retryBtn.style.display = 'none';
+      if (pollTimer === null) startPolling();
+    } else {
+      failCount++;
+      const timeStr = lastSuccessTime
+        ? lastSuccessTime.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : '--:--:--';
+      errorText.textContent = `\u26a0\ufe0f Backend no disponible \u2014 \u00faltimo dato: ${timeStr} (${failCount} intentos)`;
+      banner.classList.add('show');
+      if (failCount > 3) {
+        stopPolling();
+        retryBtn.style.display = 'inline-block';
+      }
+    }
+  }
+
+  function startPolling() {
+    if (pollTimer !== null) clearInterval(pollTimer);
+    pollTimer = setInterval(tick, 3000);
+  }
+
+  function stopPolling() {
+    if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
   }
 
   function pushEquity(equity) {
@@ -708,7 +770,13 @@
   }
 
   async function tick() {
-    data = await fetchStatus();
+    try {
+      data = await fetchStatusLive();
+      updateErrorBanner(true);
+    } catch {
+      updateErrorBanner(false);
+      data = demoData();
+    }
     renderAll();
   }
 
@@ -740,8 +808,13 @@
     };
   });
 
+  $('retryBtn').onclick = () => {
+    failCount = 0;
+    tick();
+  };
+
   tick();
-  setInterval(tick, 3000);
+  startPolling();
 })();
 </script>
 </body>
