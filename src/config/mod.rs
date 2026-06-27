@@ -39,9 +39,13 @@ pub struct ExecutionConfig {
     /// Close a NO position once its mark price reaches this level (resolution-win proxy).
     #[serde(default = "default_take_profit_price")]
     pub take_profit_price: f64,
-    /// Close a NO position once its mark price falls to this level (cut losers).
-    #[serde(default = "default_stop_loss_price")]
-    pub stop_loss_price: f64,
+    /// Legacy absolute stop-loss price. Deprecated in favor of `stop_loss_fraction`.
+    #[serde(default)]
+    pub stop_loss_price: Option<f64>,
+    /// Relative stop-loss: close if price drops more than this fraction below entry.
+    /// Example: 0.20 means close if position loses 20% from entry price.
+    #[serde(default = "default_stop_loss_fraction")]
+    pub stop_loss_fraction: f64,
 }
 
 fn default_take_profit_price() -> f64 {
@@ -50,10 +54,9 @@ fn default_take_profit_price() -> f64 {
     0.99
 }
 
-fn default_stop_loss_price() -> f64 {
-    // Very low threshold — we want to hold NO positions to resolution.
-    // Only cut if price collapses dramatically (market pivoted against us).
-    0.05
+fn default_stop_loss_fraction() -> f64 {
+    // Relative stop: close if position loses 20% from entry price.
+    0.20
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

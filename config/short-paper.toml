@@ -5,7 +5,8 @@
 mode = "paper"
 baseline_latency_ms = 50
 latency_jitter_ms = 30
-stop_loss_price = 0.05
+# Relative stop: close if price drops more than stop_loss_fraction below entry
+stop_loss_fraction = 0.15
 take_profit_price = 0.99
 
 [metrics]

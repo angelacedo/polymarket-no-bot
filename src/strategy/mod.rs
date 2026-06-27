@@ -16,7 +16,7 @@ pub fn signal_from_copy(
 ) -> TradeSignal {
     TradeSignal {
         market,
-        side: Side::No,
+        side: Side::No, // INVARIANT: always NO
         entry_price,
         suggested_size_usd: stake_usd,
         source: SignalSource::Copy {
@@ -29,7 +29,7 @@ pub fn signal_from_copy(
 pub fn signal_from_scan(market: MarketMeta, entry_price: f64, size_usd: f64) -> TradeSignal {
     TradeSignal {
         market,
-        side: Side::No,
+        side: Side::No, // INVARIANT: always NO
         entry_price,
         suggested_size_usd: size_usd,
         source: SignalSource::Strategy,

@@ -97,13 +97,12 @@ impl PaperBackend {
             let mut to_close: Vec<String> = Vec::new();
 
             for (cond_id, pos) in state.positions.iter() {
-                // Mark to the mid price to avoid booking phantom bid-ask spread
-                // losses on a buy-and-hold-to-resolution NO position.
-                let mark_price = mid_price(&self.book_cache, &pos.token_id)
-                    .unwrap_or(pos.avg_entry_price);
+                // Use realistic exit price (best bid) for mark-to-market
+                let mark_price = exit_price(&self.book_cache, &pos.token_id, pos.avg_entry_price);
 
                 let hit_take_profit = mark_price >= exec_cfg.take_profit_price;
-                let hit_stop_loss = mark_price <= exec_cfg.stop_loss_price;
+                let stop_threshold = pos.avg_entry_price * (1.0 - exec_cfg.stop_loss_fraction);
+                let hit_stop_loss = mark_price <= stop_threshold;
 
                 if hit_take_profit || hit_stop_loss {
                     let realized = (mark_price - pos.avg_entry_price) * pos.size_shares;
@@ -145,8 +144,7 @@ impl PaperBackend {
 
             for cond_id in to_close {
                 if let Some(pos) = state.positions.remove(&cond_id) {
-                    let mark_price = mid_price(&self.book_cache, &pos.token_id)
-                        .unwrap_or(pos.avg_entry_price);
+                    let mark_price = exit_price(&self.book_cache, &pos.token_id, pos.avg_entry_price);
                     // Return proceeds of the sale to available balance.
                     state.usdc_available += mark_price * pos.size_shares;
                     state.realized_pnl += (mark_price - pos.avg_entry_price) * pos.size_shares;
@@ -190,9 +188,29 @@ fn mid_price(cache: &BookCache, token_id: &str) -> Option<f64> {
     }
 }
 
+/// Best bid for exit (realistic close price for a long NO position).
+/// Falls back to mid, then entry price.
+fn exit_price(cache: &BookCache, token_id: &str, entry: f64) -> f64 {
+    if let Some(book) = cache.get(token_id) {
+        if let Some(bid) = book.best_bid() {
+            return bid;
+        }
+        if let Some(ask) = book.best_ask() {
+            return (ask + entry) / 2.0; // pessimistic mid if no bid
+        }
+    }
+    entry
+}
+
 #[async_trait]
 impl super::ExecutionBackend for PaperBackend {
     async fn place_order(&self, req: OrderRequest) -> Result<OrderResult> {
+        debug_assert_eq!(req.side, Side::No, "invariant violated: non-NO order reached execution");
+        if req.side != Side::No {
+            tracing::error!(side = ?req.side, "INVARIANT VIOLATION: order side is not NO, rejecting");
+            bail!("strategy invariant violated: only NO orders allowed");
+        }
+
         let latency = self.simulate_latency();
         sleep(Duration::from_millis(latency)).await;
         let sent = Instant::now();
@@ -400,7 +418,8 @@ mod tests {
                 baseline_latency_ms: 1,
                 latency_jitter_ms: 0,
                 take_profit_price: 0.99,
-                stop_loss_price: 0.05,
+                stop_loss_price: None,
+                stop_loss_fraction: 0.20,
             },
             10_000.0,
             cache,
@@ -429,7 +448,8 @@ mod tests {
             baseline_latency_ms: 1,
             latency_jitter_ms: 0,
             take_profit_price: 0.99,
-            stop_loss_price: 0.05,
+            stop_loss_price: None,
+            stop_loss_fraction: 0.20,
         }
     }
 
