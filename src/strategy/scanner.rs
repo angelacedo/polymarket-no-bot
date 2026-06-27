@@ -44,7 +44,8 @@ impl StrategyEngine {
         }
 
         let limit = self.config.exchange.market_discovery_limit;
-        let markets = self.hub.discover_markets(limit).await?;
+        let max_expiry = self.config.effective_max_time_to_expiry_days();
+        let markets = self.hub.discover_markets(limit, max_expiry).await?;
         let mut token_ids = Vec::new();
         for m in markets {
             self.storage.upsert_market_cache(

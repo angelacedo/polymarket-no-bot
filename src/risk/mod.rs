@@ -311,6 +311,7 @@ mod tests {
             max_notional_per_market: 200.0,
             allowed_price_range_no: [0.75, 0.99],
             min_time_to_expiry_days: 7,
+            max_time_to_expiry_days: None,
             max_category_risk_fraction: 0.25,
             max_asset_risk_fraction: 0.15,
         }

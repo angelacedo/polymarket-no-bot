@@ -10,7 +10,7 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::config::ExecutionConfig;
-use crate::exchange::BookCache;
+use crate::exchange::{BookCache, MarketResolution};
 use crate::storage::Storage;
 use crate::types::{
     Balances, BookLevel, ExecutionMode, OrderRequest, OrderResult, OrderStatus, Position, Side,
@@ -309,28 +309,36 @@ impl super::ExecutionBackend for PaperBackend {
         self.reset_portfolio();
     }
 
-    fn settle_resolved_markets(&self, resolutions: &HashMap<String, bool>) {
+    fn settle_resolved_markets(&self, resolutions: &HashMap<String, MarketResolution>) {
         let mut closed_trades: Vec<TradeRecord> = Vec::new();
         {
             let mut state = self.state.write();
+            // Only settle positions whose held token has a decisive resolved
+            // price; markets we can't price are left open.
             let to_close: Vec<String> = state
                 .positions
-                .keys()
-                .filter(|cid| resolutions.contains_key(*cid))
-                .cloned()
+                .iter()
+                .filter_map(|(cid, pos)| {
+                    resolutions
+                        .get(cid)
+                        .and_then(|r| r.price_for(&pos.token_id))
+                        .map(|_| cid.clone())
+                })
                 .collect();
 
             for cond_id in to_close {
                 if let Some(pos) = state.positions.remove(&cond_id) {
-                    let no_won = resolutions[&cond_id];
-                    // NO resolution: 1.0 if NO won, 0.0 if YES won.
-                    let exit_price = if no_won { 1.0_f64 } else { 0.0_f64 };
+                    // Settlement price for the exact token we hold (NO/Down/…).
+                    let exit_price = resolutions
+                        .get(&cond_id)
+                        .and_then(|r| r.price_for(&pos.token_id))
+                        .unwrap_or(0.0);
                     let realized = (exit_price - pos.avg_entry_price) * pos.size_shares;
                     state.usdc_available += exit_price * pos.size_shares;
                     state.realized_pnl += realized;
                     tracing::info!(
                         market = %cond_id,
-                        no_won,
+                        token = %pos.token_id,
                         exit_price,
                         realized,
                         "position settled at resolution"

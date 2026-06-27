@@ -74,6 +74,11 @@ pub struct RiskConfig {
     pub max_notional_per_market: f64,
     pub allowed_price_range_no: [f64; 2],
     pub min_time_to_expiry_days: u32,
+    /// Optional upper bound on time-to-expiry (in days, fractional allowed).
+    /// When set, only markets resolving within this window are traded — used to
+    /// target short-duration events. `None` means no upper bound.
+    #[serde(default)]
+    pub max_time_to_expiry_days: Option<f64>,
     pub max_category_risk_fraction: f64,
     pub max_asset_risk_fraction: f64,
 }
@@ -164,8 +169,15 @@ impl BotConfig {
         if self.risk.max_notional_per_market <= 0.0 {
             bail!("max_notional_per_market must be positive");
         }
-        if self.effective_min_time_to_expiry_days() == 0 {
-            bail!("min_time_to_expiry_days must be >= 1");
+        // A minimum of 0 is allowed (e.g. short-duration testing); when an
+        // upper bound is set it must be positive and not below the minimum.
+        if let Some(max_days) = self.risk.max_time_to_expiry_days {
+            if max_days <= 0.0 {
+                bail!("max_time_to_expiry_days must be positive when set");
+            }
+            if max_days < self.effective_min_time_to_expiry_days() as f64 {
+                bail!("max_time_to_expiry_days must be >= min_time_to_expiry_days");
+            }
         }
         Ok(())
     }
@@ -180,6 +192,10 @@ impl BotConfig {
         self.effective
             .min_time_to_expiry_days
             .unwrap_or(self.risk.min_time_to_expiry_days)
+    }
+
+    pub fn effective_max_time_to_expiry_days(&self) -> Option<f64> {
+        self.risk.max_time_to_expiry_days
     }
 
     pub fn effective_wallet_scale(&self, address: &str, base: f64) -> f64 {

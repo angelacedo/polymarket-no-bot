@@ -230,9 +230,10 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
         let hub_for_resolution = hub.clone();
         tokio::spawn(async move {
             let mut mtm_interval = tokio::time::interval(std::time::Duration::from_secs(15));
-            // Check for market resolutions every 5 minutes.
+            // Check for market resolutions every 60s — short-duration markets
+            // resolve fast, so settle promptly.
             let mut resolution_interval =
-                tokio::time::interval(std::time::Duration::from_secs(300));
+                tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 tokio::select! {
                     _ = mtm_interval.tick() => {

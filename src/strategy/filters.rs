@@ -9,6 +9,7 @@ pub enum FilterReject {
     NoOrderBook,
     PriceOutOfRange,
     ExpiryTooSoon,
+    ExpiryTooFar,
     InsufficientLiquidity,
     WrongSide,
 }
@@ -28,10 +29,16 @@ pub fn apply_filters(
         return Err(FilterReject::PriceOutOfRange);
     }
 
-    let min_days = config.effective_min_time_to_expiry_days();
-    let days_left = (market.end_date - Utc::now()).num_days();
-    if days_left < min_days as i64 {
+    // Fractional days so sub-day (hourly / minute) markets are handled
+    // precisely instead of being truncated to 0 by integer-day arithmetic.
+    let days_left = (market.end_date - Utc::now()).num_seconds() as f64 / 86_400.0;
+    if days_left < config.effective_min_time_to_expiry_days() as f64 {
         return Err(FilterReject::ExpiryTooSoon);
+    }
+    if let Some(max_days) = config.effective_max_time_to_expiry_days() {
+        if days_left > max_days {
+            return Err(FilterReject::ExpiryTooFar);
+        }
     }
 
     if book_depth_usd < config.strategy.min_liquidity_usd {

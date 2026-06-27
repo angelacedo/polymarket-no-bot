@@ -20,15 +20,19 @@ max_invested_capital_fraction = 0.70
 max_daily_loss_fraction = 0.05
 max_drawdown_fraction = 0.15
 max_risk_per_trade_fraction = 0.02
-max_notional_per_market = 200.0
+max_notional_per_market = 50.0
 allowed_price_range_no = [0.75, 0.99]
-min_time_to_expiry_days = 7
+# SHORT-DURATION TEST: trade only events resolving within 1 day so paper
+# settlement can be verified quickly. min=0 allows imminent (hourly/minute)
+# markets; max bounds out the long-dated ones.
+min_time_to_expiry_days = 0
+max_time_to_expiry_days = 1.0
 max_category_risk_fraction = 0.25
 max_asset_risk_fraction = 0.15
 
 [strategy]
-scan_interval_secs = 60
-min_liquidity_usd = 500.0
+scan_interval_secs = 30
+min_liquidity_usd = 400.0
 slippage_band = 0.02
 prefer_no_momentum = true
 momentum_window_secs = 3600
@@ -101,7 +105,7 @@ min_price_no_min = 0.70
 min_price_no_max = 0.90
 max_price_no_min = 0.90
 max_price_no_max = 0.995
-min_time_to_expiry_days_min = 3
+min_time_to_expiry_days_min = 0
 min_time_to_expiry_days_max = 90
 scale_factor_min = 0.01
 scale_factor_max = 0.50

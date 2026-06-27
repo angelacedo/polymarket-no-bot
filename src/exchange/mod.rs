@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, watch};
 
 pub use book::{BookCache, spawn_orderbook_feed};
 pub use data_api::DataApiClient;
-pub use gamma::{classify_market, GammaClient};
+pub use gamma::{classify_market, GammaClient, MarketResolution};
 
 use crate::config::ExchangeConfig;
 use crate::types::{BookUpdate, MarketMeta, WalletTradeEvent};
@@ -30,8 +30,12 @@ impl ExchangeHub {
         }
     }
 
-    pub async fn discover_markets(&self, limit: u32) -> Result<Vec<MarketMeta>> {
-        self.gamma.fetch_active_markets(limit).await
+    pub async fn discover_markets(
+        &self,
+        limit: u32,
+        max_expiry_days: Option<f64>,
+    ) -> Result<Vec<MarketMeta>> {
+        self.gamma.fetch_active_markets(limit, max_expiry_days).await
     }
 
     pub fn start_book_feed(

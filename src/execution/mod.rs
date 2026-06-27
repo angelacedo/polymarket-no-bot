@@ -12,6 +12,7 @@ pub use live::LiveBackend;
 pub use paper::PaperBackend;
 
 use crate::config::ExecutionConfig;
+use crate::exchange::MarketResolution;
 use crate::types::{Balances, ExecutionMode, ExposureSnapshot, OrderRequest, OrderResult, Position};
 
 /// Result of marking the portfolio to market and settling closed positions.
@@ -39,9 +40,9 @@ pub trait ExecutionBackend: Send + Sync {
     }
 
     /// Settle positions whose markets have resolved on-chain.
-    /// `resolutions` maps condition_id → true if NO won (position pays out at
-    /// $1), false if NO lost (position goes to $0).
-    fn settle_resolved_markets(&self, _resolutions: &HashMap<String, bool>) {}
+    /// `resolutions` maps condition_id → per-token settlement prices; the held
+    /// token pays out at its resolved price (≈$1 if it won, ≈$0 if it lost).
+    fn settle_resolved_markets(&self, _resolutions: &HashMap<String, MarketResolution>) {}
 
     /// Reset in-memory paper portfolio to starting capital. No-op for live.
     fn reset_paper_portfolio(&self) {}
@@ -96,7 +97,7 @@ impl ExecutionBackend for Backend {
         }
     }
 
-    fn settle_resolved_markets(&self, resolutions: &HashMap<String, bool>) {
+    fn settle_resolved_markets(&self, resolutions: &HashMap<String, MarketResolution>) {
         match self {
             Self::Live(b) => b.settle_resolved_markets(resolutions),
             Self::Paper(b) => b.settle_resolved_markets(resolutions),

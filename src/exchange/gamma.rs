@@ -22,11 +22,33 @@ impl GammaClient {
         }
     }
 
-    pub async fn fetch_active_markets(&self, limit: u32) -> Result<Vec<MarketMeta>> {
-        let url = format!(
-            "{}/markets?active=true&closed=false&limit={limit}",
-            self.base_url
-        );
+    /// Fetch active markets. When `max_expiry_days` is `Some`, discovery is
+    /// restricted to markets resolving within that window (ordered by soonest
+    /// expiry first). This is required to surface short-duration markets —
+    /// Gamma's default `/markets` listing caps at ~100 results ranked by
+    /// liquidity and therefore never returns hourly/daily markets.
+    pub async fn fetch_active_markets(
+        &self,
+        limit: u32,
+        max_expiry_days: Option<f64>,
+    ) -> Result<Vec<MarketMeta>> {
+        let url = match max_expiry_days {
+            Some(days) => {
+                let now = Utc::now();
+                let max = now + chrono::Duration::seconds((days * 86_400.0) as i64);
+                format!(
+                    "{}/markets?active=true&closed=false&limit={limit}\
+                     &end_date_min={}&end_date_max={}&order=endDate&ascending=true",
+                    self.base_url,
+                    now.format("%Y-%m-%dT%H:%M:%SZ"),
+                    max.format("%Y-%m-%dT%H:%M:%SZ"),
+                )
+            }
+            None => format!(
+                "{}/markets?active=true&closed=false&limit={limit}",
+                self.base_url
+            ),
+        };
         let resp = retry_get(&self.client, &url)
             .await
             .context("gamma markets request")?;
@@ -50,16 +72,19 @@ impl GammaClient {
     }
 
     /// Check whether any of the given condition IDs have resolved.
-    /// Returns a map of condition_id → `true` if NO won, `false` if NO lost.
-    /// Only resolved markets with a decisive outcome are included.
+    /// Returns a map of condition_id → per-token resolved price (≈0.0 or ≈1.0),
+    /// keyed by clob token id. Only resolved markets with a decisive outcome are
+    /// included.
     ///
     /// Gamma does not expose a `winnerOutcome` field; resolution is encoded in
-    /// `outcomePrices`, which mirrors the order of `outcomes`. A resolved market
-    /// has prices like `["0","1"]` (NO won) or `["1","0"]` (YES won).
+    /// `outcomePrices`, which mirrors the order of `clobTokenIds`. A resolved
+    /// market has prices like `["0","1"]` (second token won) or `["1","0"]`.
+    /// Keying by token id (rather than a YES/NO boolean) makes this work for
+    /// any binary market — Yes/No, Up/Down, or arbitrary outcome labels.
     pub async fn fetch_market_resolutions(
         &self,
         condition_ids: &[String],
-    ) -> Result<HashMap<String, bool>> {
+    ) -> Result<HashMap<String, MarketResolution>> {
         if condition_ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -94,8 +119,8 @@ impl GammaClient {
                     continue;
                 }
                 let cid = m.condition_id.clone().unwrap_or_else(|| m.id.clone());
-                if let Some(no_won) = resolved_no_outcome(&m) {
-                    results.insert(cid, no_won);
+                if let Some(res) = resolved_token_prices(&m) {
+                    results.insert(cid, res);
                 }
             }
         }
@@ -171,29 +196,47 @@ async fn retry_get(client: &Client, url: &str) -> Result<reqwest::Response> {
     shared_retry_get(client, url).await
 }
 
-/// Determine the NO-side resolution from a closed market's `outcomes` and
-/// `outcomePrices`. Returns:
-/// - `Some(true)`  → NO won (NO price ≈ 1.0)
-/// - `Some(false)` → NO lost (NO price ≈ 0.0)
-/// - `None`        → indecisive / voided (e.g. prices `["0","0"]`) or missing data
-fn resolved_no_outcome(m: &GammaMarket) -> Option<bool> {
-    let outcomes = m.outcomes.as_ref()?;
+/// Resolved settlement prices for a market, keyed by clob token id.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MarketResolution {
+    /// clob token id → resolved price (≈0.0 for the losing side, ≈1.0 for the winner).
+    pub token_prices: HashMap<String, f64>,
+}
+
+impl MarketResolution {
+    /// Resolved price for a specific token, snapped to exactly 0.0 / 1.0.
+    pub fn price_for(&self, token_id: &str) -> Option<f64> {
+        self.token_prices
+            .get(token_id)
+            .map(|&p| if p >= 0.99 { 1.0 } else { 0.0 })
+    }
+}
+
+/// Build per-token resolution prices from a closed market's `clobTokenIds` and
+/// `outcomePrices` (which share the same ordering). Returns `None` for
+/// indecisive/voided markets (e.g. prices `["0","0"]`) or missing data.
+///
+/// Works for any binary market regardless of outcome labels (Yes/No, Up/Down…)
+/// because it maps the token id directly to its settlement price.
+fn resolved_token_prices(m: &GammaMarket) -> Option<MarketResolution> {
+    let tokens = m.clob_token_ids.as_ref()?;
     let prices = m.outcome_prices.as_ref()?;
-    if outcomes.len() != prices.len() || outcomes.is_empty() {
+    if tokens.len() != prices.len() || tokens.is_empty() {
         return None;
     }
-    let no_idx = outcomes
-        .iter()
-        .position(|o| o.eq_ignore_ascii_case("no"))?;
     let parsed: Vec<f64> = prices.iter().map(|p| p.parse().unwrap_or(0.0)).collect();
 
     // A decisive resolution has exactly one winning outcome priced ≈ 1.0.
     // Voided/invalid markets show e.g. ["0","0"] and must be skipped.
-    let has_decisive_winner = parsed.iter().any(|&p| p >= 0.99);
-    if !has_decisive_winner {
+    if !parsed.iter().any(|&p| p >= 0.99) {
         return None;
     }
-    Some(parsed[no_idx] >= 0.99)
+    let token_prices = tokens
+        .iter()
+        .cloned()
+        .zip(parsed.into_iter())
+        .collect();
+    Some(MarketResolution { token_prices })
 }
 
 #[derive(Debug, Deserialize)]
@@ -476,30 +519,51 @@ mod tests {
     }
 
     #[test]
-    fn detects_no_resolution_from_outcome_prices() {
-        // NO won: outcomes=[Yes,No], prices=[0,1]
+    fn resolves_token_prices_for_yes_no() {
+        // Second token (NO) won: tokens=[111,222], prices=[0,1]
         let raw_no_won = r#"{
             "id": "1", "conditionId": "0x1", "closed": true,
+            "clobTokenIds": "[\"111\", \"222\"]",
             "outcomes": "[\"Yes\", \"No\"]", "outcomePrices": "[\"0\", \"1\"]"
         }"#;
         let m: GammaMarket = serde_json::from_str(raw_no_won).unwrap();
-        assert_eq!(resolved_no_outcome(&m), Some(true));
+        let res = resolved_token_prices(&m).expect("decisive");
+        assert_eq!(res.price_for("222"), Some(1.0));
+        assert_eq!(res.price_for("111"), Some(0.0));
 
-        // YES won: prices=[1,0]
+        // First token won: prices=[1,0]
         let raw_yes_won = r#"{
             "id": "2", "conditionId": "0x2", "closed": true,
+            "clobTokenIds": "[\"111\", \"222\"]",
             "outcomes": "[\"Yes\", \"No\"]", "outcomePrices": "[\"1\", \"0\"]"
         }"#;
         let m: GammaMarket = serde_json::from_str(raw_yes_won).unwrap();
-        assert_eq!(resolved_no_outcome(&m), Some(false));
+        let res = resolved_token_prices(&m).expect("decisive");
+        assert_eq!(res.price_for("222"), Some(0.0));
+        assert_eq!(res.price_for("111"), Some(1.0));
 
         // Voided / indecisive: prices=[0,0]
         let raw_void = r#"{
             "id": "3", "conditionId": "0x3", "closed": true,
+            "clobTokenIds": "[\"111\", \"222\"]",
             "outcomes": "[\"Yes\", \"No\"]", "outcomePrices": "[\"0\", \"0\"]"
         }"#;
         let m: GammaMarket = serde_json::from_str(raw_void).unwrap();
-        assert_eq!(resolved_no_outcome(&m), None);
+        assert_eq!(resolved_token_prices(&m), None);
+    }
+
+    #[test]
+    fn resolves_token_prices_for_up_down() {
+        // Up/Down market with no "No" label: Down (token bbb) won.
+        let raw = r#"{
+            "id": "4", "conditionId": "0x4", "closed": true,
+            "clobTokenIds": "[\"aaa\", \"bbb\"]",
+            "outcomes": "[\"Up\", \"Down\"]", "outcomePrices": "[\"0\", \"1\"]"
+        }"#;
+        let m: GammaMarket = serde_json::from_str(raw).unwrap();
+        let res = resolved_token_prices(&m).expect("decisive");
+        assert_eq!(res.price_for("bbb"), Some(1.0));
+        assert_eq!(res.price_for("aaa"), Some(0.0));
     }
 
     #[test]
