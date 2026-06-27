@@ -363,7 +363,8 @@ impl Storage {
         Ok(count as usize)
     }
 
-    /// Wipe all trading history (trades, orders, equity curve, position snapshots).
+    /// Wipe ALL persisted state: trading history, statistics, tuning/learning
+    /// audit log, and the market discovery cache. Leaves a pristine database.
     pub fn reset_trading_history(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(
@@ -371,6 +372,8 @@ impl Storage {
              DELETE FROM orders;
              DELETE FROM equity_curve;
              DELETE FROM positions_snapshot;
+             DELETE FROM tuning_audit;
+             DELETE FROM markets_cache;
              VACUUM;",
         )?;
         Ok(())

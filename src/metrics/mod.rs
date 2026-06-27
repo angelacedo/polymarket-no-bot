@@ -35,6 +35,15 @@ impl MetricsRegistry {
             ExecutionMode::Live => *self.live_pnl.write() = pnl,
         }
     }
+
+    /// Clear all in-memory statistics (latency samples, PnL snapshots, circuit
+    /// state). Used by the admin reset so the dashboard starts blank.
+    pub fn reset(&self) {
+        *self.latency.write() = LatencyTracker::default();
+        *self.paper_pnl.write() = PnlSnapshot::default();
+        *self.live_pnl.write() = PnlSnapshot::default();
+        *self.circuit.write() = CircuitBreakerState::default();
+    }
 }
 
 pub fn build_state(

@@ -154,18 +154,19 @@ async fn admin_reset(
     }
 
     state.backend.reset_paper_portfolio();
+    state.registry.reset();
     {
         let mut rk = state.risk.write();
         rk.reset();
         state.registry.update_from_risk(&rk, ExecutionMode::Paper);
     }
 
-    info!("paper trading reset via admin endpoint");
+    info!("full reset via admin endpoint (history, stats, tuning, cache, balance)");
     (
         StatusCode::OK,
         serde_json::json!({
             "ok": true,
-            "message": "all trade history cleared; paper portfolio reset to starting capital"
+            "message": "full reset: trades, orders, equity curve, tuning audit, market cache, latency stats and paper balance all cleared"
         })
         .to_string(),
     )
