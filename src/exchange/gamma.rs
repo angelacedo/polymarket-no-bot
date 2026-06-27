@@ -119,6 +119,18 @@ impl GammaClient {
         let question = m.question.as_deref().unwrap_or("");
         let (category, underlying) = classify_market(question, m.tags.as_deref().unwrap_or(&[]));
 
+        // Prefer the parent event slug for the public URL — the per-market slug
+        // carries a numeric suffix and 404s on polymarket.com. Fall back to the
+        // market slug only if no event slug is available.
+        let slug = m
+            .events
+            .as_ref()
+            .and_then(|evs| evs.first())
+            .and_then(|ev| ev.slug.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| m.slug.clone())
+            .unwrap_or_default();
+
         // Validate YES/NO token order from the `outcomes` field.
         // Gamma guarantees outcomes[i] matches clobTokenIds[i].
         // If outcomes[0] starts with "No", the token order is inverted.
@@ -143,7 +155,7 @@ impl GammaClient {
         Some(MarketMeta {
             condition_id: m.condition_id.unwrap_or_else(|| m.id.clone()),
             question: m.question.unwrap_or_default(),
-            slug: m.slug.unwrap_or_default(),
+            slug,
             yes_token_id,
             no_token_id,
             category,
@@ -189,9 +201,13 @@ fn resolved_no_outcome(m: &GammaMarket) -> Option<bool> {
 struct GammaMarket {
     id: String,
     question: Option<String>,
-    /// URL slug used to build the public Polymarket market link.
+    /// Per-market slug. NOTE: for grouped markets this carries a numeric suffix
+    /// (e.g. `...-739`) and is NOT a valid public URL — the event slug is.
     #[serde(default)]
     slug: Option<String>,
+    /// Parent event(s); `events[0].slug` is the canonical public URL slug.
+    #[serde(default)]
+    events: Option<Vec<GammaEvent>>,
     #[serde(default)]
     tags: Option<Vec<String>>,
     #[serde(default)]
@@ -215,6 +231,12 @@ struct GammaMarket {
     /// True once the market has been resolved and settled.
     #[serde(default)]
     closed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GammaEvent {
+    #[serde(default)]
+    slug: Option<String>,
 }
 
 /// `outcomes` can arrive as a native JSON array or as a JSON-encoded string.
@@ -400,7 +422,8 @@ mod tests {
         let raw = r#"{
             "id": "540817",
             "question": "Will BTC exceed 100k?",
-            "slug": "will-btc-exceed-100k",
+            "slug": "will-btc-exceed-100k-739",
+            "events": [{"slug": "btc-price-2026"}],
             "conditionId": "0xabc",
             "clobTokenIds": "[\"111\", \"222\"]",
             "outcomes": "[\"Yes\", \"No\"]",
@@ -428,7 +451,28 @@ mod tests {
         assert_eq!(meta.yes_token_id, "111");
         assert_eq!(meta.no_token_id, "222");
         assert_eq!(meta.category, "crypto");
-        assert_eq!(meta.slug, "will-btc-exceed-100k");
+        // Event slug is preferred over the per-market slug for the public URL.
+        assert_eq!(meta.slug, "btc-price-2026");
+    }
+
+    #[test]
+    fn falls_back_to_market_slug_without_event() {
+        let raw = r#"{
+            "id": "1", "question": "Standalone?", "slug": "standalone-market",
+            "conditionId": "0x1", "clobTokenIds": "[\"1\", \"2\"]",
+            "outcomes": "[\"Yes\", \"No\"]", "enableOrderBook": true,
+            "endDate": "2026-07-31T12:00:00Z", "liquidityNum": 100.0
+        }"#;
+        let market: GammaMarket = serde_json::from_str(raw).unwrap();
+        let client = GammaClient::new(&ExchangeConfig {
+            gamma_base_url: "https://gamma-api.polymarket.com".into(),
+            data_api_base_url: String::new(),
+            clob_host: String::new(),
+            chain_id: 137,
+            market_discovery_limit: 200,
+        });
+        let meta = client.to_market_meta(market).expect("valid market");
+        assert_eq!(meta.slug, "standalone-market");
     }
 
     #[test]
