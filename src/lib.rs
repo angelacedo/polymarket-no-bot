@@ -8,5 +8,6 @@ pub mod risk;
 pub mod storage;
 pub mod strategy;
 pub mod types;
+pub mod wallets;
 
 pub use config::BotConfig;

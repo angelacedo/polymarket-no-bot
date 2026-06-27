@@ -37,6 +37,9 @@ momentum_window_secs = 900
 
 [copytrade]
 poll_interval_ms = 1500
+auto_discover_wallets = true
+discovery_interval_secs = 1800
+max_candidate_wallets = 5
 
 # phdcapital — Predicts.guru
 [[copytrade.wallets]]

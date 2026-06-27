@@ -102,6 +102,27 @@ pub struct CopyTradeConfig {
     pub poll_interval_ms: u64,
     #[serde(default)]
     pub wallets: Vec<CopyWalletConfig>,
+    /// Enable automatic wallet discovery from Polymarket leaderboard
+    #[serde(default = "default_auto_discover")]
+    pub auto_discover_wallets: bool,
+    /// How often to refresh the candidate wallet list (seconds)
+    #[serde(default = "default_discovery_interval")]
+    pub discovery_interval_secs: u64,
+    /// Maximum number of auto-discovered wallets to copy
+    #[serde(default = "default_max_candidates")]
+    pub max_candidate_wallets: u32,
+}
+
+fn default_auto_discover() -> bool {
+    true
+}
+
+fn default_discovery_interval() -> u64 {
+    3600 // 1 hour
+}
+
+fn default_max_candidates() -> u32 {
+    10
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

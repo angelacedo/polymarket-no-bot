@@ -17,7 +17,6 @@ use polymarket_no_bot::learning::run_learning_loop;
 use polymarket_no_bot::metrics::{MetricsRegistry, MetricsServer, build_state};
 use polymarket_no_bot::risk::RiskEngine;
 use polymarket_no_bot::storage::Storage;
-use polymarket_no_bot::strategy::{StrategyEngine, run_strategy_loop};
 use polymarket_no_bot::types::{
     ExecutionMode, OrderIntent, OrderRequest, RiskDecision, Side, TradeRecord, TradeSignal,
 };
@@ -130,43 +129,18 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
     };
 
     let (signal_tx, mut signal_rx) = mpsc::channel::<TradeSignal>(1024);
-    let (book_tx, book_rx) = mpsc::channel::<polymarket_no_bot::types::BookUpdate>(4096);
-    let (copy_tx, copy_rx) = mpsc::channel::<TradeSignal>(256);
     let (config_tx, config_rx) = watch::channel(config.clone());
 
-    let mut strategy_engine = StrategyEngine::new(config.clone(), hub.clone(), storage.clone());
-    let token_ids = strategy_engine.refresh_markets().await.unwrap_or_default();
-    let markets_shared = Arc::new(RwLock::new(strategy_engine.markets().clone()));
-
-    // Dynamic WS subscription: strategy loop sends new token lists here when
-    // refresh_markets() discovers new markets after startup.
-    let (token_ids_tx, token_ids_rx) = tokio::sync::watch::channel(token_ids.clone());
-
-    let _book_feed = hub.start_book_feed(token_ids_rx, book_tx);
-
-    let strategy_handle = {
-        let cfg = config.clone();
-        let markets_shared = markets_shared.clone();
-        tokio::spawn(async move {
-            run_strategy_loop(
-                strategy_engine,
-                book_rx,
-                copy_rx,
-                signal_tx.clone(),
-                cfg.strategy.scan_interval_secs,
-                Some(markets_shared.clone()),
-                Some(token_ids_tx),
-            )
-            .await;
-        })
-    };
+    // Copytrade-only mode: no strategy scanner, just copy wallets
+    let markets_shared = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
     let copy_handle = {
         let cfg = config.clone();
         let hub = hub.clone();
         let markets = markets_shared.clone();
+        let signal_tx = signal_tx.clone();
         tokio::spawn(async move {
-            run_copytrade_loop(cfg, hub, markets, copy_tx).await;
+            run_copytrade_loop(cfg, hub, markets, signal_tx).await;
         })
     };
 
@@ -280,7 +254,6 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
     tokio::signal::ctrl_c().await?;
     info!("shutdown signal received");
     execution_handle.abort();
-    strategy_handle.abort();
     copy_handle.abort();
     learning_handle.abort();
     metrics_handle.abort();
