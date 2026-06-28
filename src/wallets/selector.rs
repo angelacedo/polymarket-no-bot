@@ -28,6 +28,203 @@ const MIN_CLOSED_MARKETS: u32 = 50;
 const MAX_AVG_HOLD_DAYS: f64 = 7.0;
 const MIN_DRAWDOWN: f64 = -0.30;
 const MIN_NO_TRADE_RATIO: f64 = 0.40; // at least 40% of trades must be NO
+const MIN_RESOLVED_NO_TRADES_FOR_NO_WIN_RATE: usize = 10;
+const MIN_TOTAL_USABLE_TRADES: usize = 20;
+
+// ─── Safe JSON extraction helpers ───────────────────────────────────
+
+/// Extract a boolean from a JSON value, trying multiple field names
+fn extract_bool(val: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    for key in keys {
+        if let Some(b) = val.get(*key).and_then(|v| v.as_bool()) {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// Extract an f64 from a JSON value, trying multiple field names
+fn extract_f64(val: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    for key in keys {
+        if let Some(f) = val.get(*key).and_then(|v| v.as_f64()) {
+            return Some(f);
+        }
+    }
+    None
+}
+
+/// Extract a string from a JSON value, trying multiple field names
+fn extract_string(val: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(s) = val.get(*key).and_then(|v| v.as_str()) {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+/// Extract a unix timestamp (as f64 seconds) from a JSON value
+fn extract_timestamp(val: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    for key in keys {
+        if let Some(ts) = val.get(*key) {
+            // Try as number first (unix timestamp)
+            if let Some(n) = ts.as_f64() {
+                return Some(n);
+            }
+            // Try as string (ISO 8601 or unix string)
+            if let Some(s) = ts.as_str() {
+                if let Ok(n) = s.parse::<f64>() {
+                    return Some(n);
+                }
+                if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+                    return Some(dt.timestamp() as f64);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Fetch raw activity data from Polymarket Data API
+async fn fetch_wallet_activity(client: &Client, address: &str) -> Result<Vec<serde_json::Value>> {
+    let url = format!(
+        "https://data-api.polymarket.com/activity?user={}&limit=500",
+        address
+    );
+    
+    debug!(wallet = %address, "fetching wallet activity from Data API");
+    
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("fetching wallet activity")?;
+    
+    if !resp.status().is_success() {
+        anyhow::bail!("Data API returned status {}", resp.status());
+    }
+    
+    let activities: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .context("parsing activity response")?;
+    
+    info!(
+        wallet = %address,
+        count = activities.len(),
+        "fetched wallet activity"
+    );
+    
+    Ok(activities)
+}
+
+/// Build a CandidateWallet from raw activity data
+fn candidate_from_activity(
+    address: &str,
+    activities: &[serde_json::Value],
+) -> Result<CandidateWallet> {
+    // Filter to TRADE entries only (skip YIELD, etc.)
+    let trades: Vec<_> = activities
+        .iter()
+        .filter(|a| {
+            extract_string(a, &["type"]).map(|t| t.eq_ignore_ascii_case("TRADE")).unwrap_or(false)
+        })
+        .collect();
+    
+    if trades.is_empty() {
+        anyhow::bail!("wallet has no usable trade activity");
+    }
+    
+    let total_trades = trades.len();
+    debug!(
+        wallet = %address,
+        total_trades,
+        "processing trade activity"
+    );
+    
+    // NO trade ratio
+    let no_trades: Vec<_> = trades
+        .iter()
+        .filter(|t| {
+            extract_string(t, &["outcome"])
+                .map(|o| o.eq_ignore_ascii_case("No"))
+                .unwrap_or(false)
+        })
+        .collect();
+    
+    let no_trade_ratio = no_trades.len() as f64 / total_trades as f64;
+    debug!(
+        wallet = %address,
+        no_trade_ratio = format!("{:.2}", no_trade_ratio),
+        "computed NO trade ratio"
+    );
+    
+    // Unique markets (conditionIds)
+    let unique_markets: std::collections::HashSet<_> = trades
+        .iter()
+        .filter_map(|t| extract_string(t, &["conditionId", "condition_id", "market_id"]))
+        .filter(|s| !s.is_empty())
+        .collect();
+    
+    let closed_markets = unique_markets.len() as u32;
+    
+    // Average hold time estimation
+    // Group trades by conditionId, look for BUY/SELL pairs
+    let mut condition_timestamps: HashMap<String, Vec<(f64, String)>> = HashMap::new();
+    for trade in &trades {
+        let condition_id = match extract_string(trade, &["conditionId", "condition_id"]) {
+            Some(id) if !id.is_empty() => id,
+            _ => continue,
+        };
+        let timestamp = match extract_timestamp(trade, &["timestamp", "createdAt", "created_at"]) {
+            Some(ts) => ts,
+            None => continue,
+        };
+        let side = extract_string(trade, &["side"]).unwrap_or_default();
+        condition_timestamps
+            .entry(condition_id)
+            .or_default()
+            .push((timestamp, side));
+    }
+    
+    let hold_times: Vec<f64> = condition_timestamps
+        .values()
+        .filter_map(|entries| {
+            if entries.len() < 2 {
+                return None;
+            }
+            let mut sorted = entries.clone();
+            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let first = sorted.first()?.0;
+            let last = sorted.last()?.0;
+            let days = (last - first) / 86400.0;
+            if days > 0.0 { Some(days) } else { None }
+        })
+        .collect();
+    
+    let avg_hold_days = if hold_times.is_empty() {
+        None
+    } else {
+        Some(hold_times.iter().sum::<f64>() / hold_times.len() as f64)
+    };
+    
+    // Note: win_rate, total_pnl, no_win_rate cannot be reliably computed from activity alone
+    // They require resolution data which the activity endpoint doesn't provide
+    // These will be set to conservative defaults
+    
+    Ok(CandidateWallet {
+        address: address.to_string(),
+        win_rate: 0.0, // Cannot compute from activity
+        closed_markets,
+        avg_hold_days,
+        max_drawdown: None,
+        total_pnl: 0.0, // Cannot compute from activity
+        sharpe: None,
+        source: "data_api_direct".to_string(),
+        no_trade_ratio: Some(no_trade_ratio),
+        no_win_rate: None, // Cannot compute without resolution data
+    })
+}
 
 /// Compute composite score for ranking wallets
 /// Higher is better: combines Sharpe, win_rate, PnL, closed_markets, and NO-side quality
@@ -703,7 +900,7 @@ pub fn evaluate_wallet(w: &CandidateWallet) -> WalletEvaluation {
     let mut reasons = Vec::new();
     
     if w.win_rate < MIN_WIN_RATE {
-        reasons.push(format!("win_rate {:.1}% < 60%", w.win_rate * 100.0));
+        reasons.push(format!("win_rate {:.1}% < {:.0}%", w.win_rate * 100.0, MIN_WIN_RATE * 100.0));
     }
     
     if w.closed_markets < MIN_CLOSED_MARKETS {
@@ -718,7 +915,25 @@ pub fn evaluate_wallet(w: &CandidateWallet) -> WalletEvaluation {
     
     if let Some(dd) = w.max_drawdown {
         if dd < MIN_DRAWDOWN {
-            reasons.push(format!("max_drawdown {:.1}% < {:.1}%", dd * 100.0, MIN_DRAWDOWN * 100.0));
+            reasons.push(format!("max_drawdown {:.1}% < {:.0}%", dd * 100.0, MIN_DRAWDOWN * 100.0));
+        }
+    }
+    
+    // NO-side checks
+    if let Some(no_ratio) = w.no_trade_ratio {
+        if no_ratio < MIN_NO_TRADE_RATIO {
+            reasons.push(format!("no_trade_ratio {:.1}% < {:.0}%", no_ratio * 100.0, MIN_NO_TRADE_RATIO * 100.0));
+        }
+    } else {
+        reasons.push("no_trade_ratio unknown".to_string());
+    }
+    
+    // NO win rate check (only if we have enough resolved NO trades)
+    if let Some(no_wr) = w.no_win_rate {
+        // Use a slightly lower threshold for NO win rate since NO bets have higher base probability
+        const MIN_NO_WIN_RATE: f64 = 0.55;
+        if no_wr < MIN_NO_WIN_RATE {
+            reasons.push(format!("no_win_rate {:.1}% < {:.0}%", no_wr * 100.0, MIN_NO_WIN_RATE * 100.0));
         }
     }
     
@@ -739,6 +954,7 @@ pub fn evaluate_wallet(w: &CandidateWallet) -> WalletEvaluation {
 }
 
 /// Fetch metrics for a specific wallet address directly from Polymarket Data API
+/// Uses /activity for trade patterns and /positions for PnL/resolution data
 pub async fn fetch_wallet_metrics(address: &str) -> Result<CandidateWallet> {
     let client = Client::builder()
         .user_agent("polymarket-no-bot/0.1")
@@ -746,100 +962,107 @@ pub async fn fetch_wallet_metrics(address: &str) -> Result<CandidateWallet> {
         .build()
         .context("building HTTP client")?;
     
-    // Use positions endpoint for better metrics (includes PnL, outcomes, resolved status)
-    let url = format!(
+    // Fetch activity data for trade patterns
+    let activities = fetch_wallet_activity(&client, address).await?;
+    
+    if activities.is_empty() {
+        anyhow::bail!("wallet has no usable activity history");
+    }
+    
+    // Build base metrics from activity
+    let mut wallet = candidate_from_activity(address, &activities)?;
+    
+    // Supplement with positions data for PnL and resolution metrics
+    let positions_url = format!(
         "https://data-api.polymarket.com/positions?user={}&limit=500",
         address
     );
     
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .context("fetching wallet positions from Data API")?;
-    
-    if !resp.status().is_success() {
-        anyhow::bail!("Data API returned status {}", resp.status());
+    if let Ok(resp) = client.get(&positions_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(positions) = resp.json::<Vec<serde_json::Value>>().await {
+                if !positions.is_empty() {
+                    enrich_from_positions(&mut wallet, &positions);
+                }
+            }
+        }
     }
     
-    let positions: Vec<serde_json::Value> = resp
-        .json()
-        .await
-        .context("parsing Data API response")?;
+    info!(
+        wallet = %address,
+        win_rate = wallet.win_rate,
+        closed_markets = wallet.closed_markets,
+        total_pnl = wallet.total_pnl,
+        no_trade_ratio = ?wallet.no_trade_ratio,
+        no_win_rate = ?wallet.no_win_rate,
+        "computed wallet metrics"
+    );
     
-    if positions.is_empty() {
-        anyhow::bail!("no positions found for wallet {}", address);
-    }
-    
-    // Calculate metrics from positions data
+    Ok(wallet)
+}
+
+/// Enrich a CandidateWallet with data from positions endpoint
+fn enrich_from_positions(wallet: &mut CandidateWallet, positions: &[serde_json::Value]) {
     let total_positions = positions.len() as f64;
+    if total_positions == 0.0 {
+        return;
+    }
     
-    // NO trade ratio (positions with outcome="No")
-    let no_positions: Vec<_> = positions.iter()
-        .filter(|p| p.get("outcome").and_then(|v| v.as_str()) == Some("No"))
-        .collect();
-    let no_trade_ratio = no_positions.len() as f64 / total_positions;
-    
-    // Resolved positions (redeemable=true or market ended)
-    let resolved_positions: Vec<_> = positions.iter()
-        .filter(|p| p.get("redeemable").and_then(|v| v.as_bool()) == Some(true))
+    // Resolved positions (redeemable=true)
+    let resolved: Vec<_> = positions
+        .iter()
+        .filter(|p| extract_bool(p, &["redeemable"]).unwrap_or(false))
         .collect();
     
-    // Win rate (resolved positions with positive PnL)
-    let win_rate = if resolved_positions.is_empty() {
-        0.0
-    } else {
-        let wins = resolved_positions.iter()
-            .filter(|p| {
-                p.get("cashPnl").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0
-            })
+    // Win rate from resolved positions
+    if !resolved.is_empty() {
+        let wins = resolved
+            .iter()
+            .filter(|p| extract_f64(p, &["cashPnl", "realizedPnl"]).unwrap_or(0.0) > 0.0)
             .count() as f64;
-        wins / resolved_positions.len() as f64
-    };
+        wallet.win_rate = wins / resolved.len() as f64;
+    }
     
-    // NO win rate (resolved NO positions with positive PnL)
-    let resolved_no_positions: Vec<_> = no_positions.iter()
-        .filter(|p| p.get("redeemable").and_then(|v| v.as_bool()) == Some(true))
+    // Total PnL from all positions
+    wallet.total_pnl = positions
+        .iter()
+        .filter_map(|p| extract_f64(p, &["cashPnl", "realizedPnl"]))
+        .sum();
+    
+    // Closed markets from resolved positions
+    let unique_resolved: std::collections::HashSet<_> = resolved
+        .iter()
+        .filter_map(|p| extract_string(p, &["conditionId", "condition_id"]))
+        .collect();
+    if !unique_resolved.is_empty() {
+        wallet.closed_markets = unique_resolved.len() as u32;
+    }
+    
+    // NO win rate from resolved NO positions
+    let resolved_no: Vec<_> = positions
+        .iter()
+        .filter(|p| {
+            extract_bool(p, &["redeemable"]).unwrap_or(false)
+                && extract_string(p, &["outcome"])
+                    .map(|o| o.eq_ignore_ascii_case("No"))
+                    .unwrap_or(false)
+        })
         .collect();
     
-    let no_win_rate = if resolved_no_positions.is_empty() {
-        None
-    } else {
-        let no_wins = resolved_no_positions.iter()
-            .filter(|p| {
-                p.get("cashPnl").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0
-            })
+    if resolved_no.len() >= MIN_RESOLVED_NO_TRADES_FOR_NO_WIN_RATE {
+        let no_wins = resolved_no
+            .iter()
+            .filter(|p| extract_f64(p, &["cashPnl", "realizedPnl"]).unwrap_or(0.0) > 0.0)
             .count() as f64;
-        Some(no_wins / resolved_no_positions.len() as f64)
-    };
+        wallet.no_win_rate = Some(no_wins / resolved_no.len() as f64);
+    }
     
-    // Closed markets (unique conditionIds from resolved positions)
-    let closed_markets = resolved_positions.iter()
-        .filter_map(|p| p.get("conditionId").and_then(|v| v.as_str()))
-        .collect::<std::collections::HashSet<_>>()
-        .len() as u32;
-    
-    // Total PnL (sum of cashPnl across all positions)
-    let total_pnl = positions.iter()
-        .filter_map(|p| p.get("cashPnl").and_then(|v| v.as_f64()))
-        .sum::<f64>();
-    
-    // Average hold time (not directly available, estimate from position data)
-    // Since we don't have created_at/resolved_at, we'll leave this as None
-    let avg_hold_days = None;
-    
-    Ok(CandidateWallet {
-        address: address.to_string(),
-        win_rate,
-        closed_markets,
-        avg_hold_days,
-        max_drawdown: None,
-        total_pnl,
-        sharpe: None,
-        source: "data_api_direct".to_string(),
-        no_trade_ratio: Some(no_trade_ratio),
-        no_win_rate,
-    })
+    debug!(
+        wallet = %wallet.address,
+        resolved_count = resolved.len(),
+        resolved_no_count = resolved_no.len(),
+        "enriched from positions"
+    );
 }
 
 #[cfg(test)]
@@ -984,5 +1207,152 @@ mod tests {
         
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].win_rate, 0.70); // Should keep w2 (more fields)
+    }
+
+    #[test]
+    fn test_evaluate_wallet_with_no_side_metrics() {
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        w.no_trade_ratio = Some(0.70);
+        w.no_win_rate = Some(0.65);
+        
+        let eval = evaluate_wallet(&w);
+        assert_eq!(eval.status, "OK");
+        assert!(eval.reasons.is_empty());
+    }
+
+    #[test]
+    fn test_evaluate_wallet_rejects_low_no_trade_ratio() {
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        w.no_trade_ratio = Some(0.20);
+        w.no_win_rate = Some(0.65);
+        
+        let eval = evaluate_wallet(&w);
+        assert_eq!(eval.status, "WEAK");
+        assert!(eval.reasons.iter().any(|r| r.contains("no_trade_ratio")));
+    }
+
+    #[test]
+    fn test_evaluate_wallet_rejects_low_no_win_rate() {
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        w.no_trade_ratio = Some(0.70);
+        w.no_win_rate = Some(0.40);
+        
+        let eval = evaluate_wallet(&w);
+        assert_eq!(eval.status, "WEAK");
+        assert!(eval.reasons.iter().any(|r| r.contains("no_win_rate")));
+    }
+
+    #[test]
+    fn test_evaluate_wallet_unknown_no_trade_ratio() {
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        w.no_trade_ratio = None;
+        w.no_win_rate = None;
+        
+        let eval = evaluate_wallet(&w);
+        assert_eq!(eval.status, "WEAK");
+        assert!(eval.reasons.iter().any(|r| r.contains("no_trade_ratio unknown")));
+    }
+
+    #[test]
+    fn test_candidate_from_activity_basic() {
+        let activities = vec![
+            serde_json::json!({
+                "type": "TRADE",
+                "outcome": "No",
+                "side": "BUY",
+                "conditionId": "0xabc123",
+                "timestamp": 1700000000.0
+            }),
+            serde_json::json!({
+                "type": "TRADE",
+                "outcome": "No",
+                "side": "BUY",
+                "conditionId": "0xdef456",
+                "timestamp": 1700100000.0
+            }),
+            serde_json::json!({
+                "type": "TRADE",
+                "outcome": "Yes",
+                "side": "BUY",
+                "conditionId": "0xghi789",
+                "timestamp": 1700200000.0
+            }),
+        ];
+        
+        let result = candidate_from_activity("0x1234567890123456789012345678901234567890", &activities);
+        assert!(result.is_ok());
+        
+        let wallet = result.unwrap();
+        assert_eq!(wallet.closed_markets, 3);
+        assert!((wallet.no_trade_ratio.unwrap() - 0.666).abs() < 0.01);
+        assert_eq!(wallet.source, "data_api_direct");
+    }
+
+    #[test]
+    fn test_candidate_from_activity_filters_non_trades() {
+        let activities = vec![
+            serde_json::json!({
+                "type": "YIELD",
+                "outcome": "",
+                "timestamp": 1700000000.0
+            }),
+            serde_json::json!({
+                "type": "TRADE",
+                "outcome": "No",
+                "side": "BUY",
+                "conditionId": "0xabc123",
+                "timestamp": 1700100000.0
+            }),
+        ];
+        
+        let result = candidate_from_activity("0x1234567890123456789012345678901234567890", &activities);
+        assert!(result.is_ok());
+        
+        let wallet = result.unwrap();
+        assert_eq!(wallet.closed_markets, 1);
+        assert!((wallet.no_trade_ratio.unwrap() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_candidate_from_activity_empty_trades() {
+        let activities = vec![
+            serde_json::json!({
+                "type": "YIELD",
+                "outcome": "",
+                "timestamp": 1700000000.0
+            }),
+        ];
+        
+        let result = candidate_from_activity("0x1234567890123456789012345678901234567890", &activities);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compute_score_with_no_metrics() {
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        w.no_trade_ratio = None;
+        w.no_win_rate = None;
+        
+        let score = compute_score(&w);
+        assert!(score > 0.0 && score <= 1.0, "score={score}");
+    }
+
+    #[test]
+    fn test_extract_helpers() {
+        let val = serde_json::json!({
+            "name": "test",
+            "value": 42.5,
+            "flag": true,
+            "timestamp": 1700000000.0
+        });
+        
+        assert_eq!(extract_string(&val, &["name", "other"]), Some("test".to_string()));
+        assert_eq!(extract_f64(&val, &["value", "other"]), Some(42.5));
+        assert_eq!(extract_bool(&val, &["flag", "other"]), Some(true));
+        assert_eq!(extract_timestamp(&val, &["timestamp"]), Some(1700000000.0));
+        
+        // Test fallback
+        assert_eq!(extract_string(&val, &["missing", "name"]), Some("test".to_string()));
+        assert_eq!(extract_string(&val, &["missing"]), None);
     }
 }
