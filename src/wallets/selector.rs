@@ -1,32 +1,30 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
+use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// Candidate wallet from Polymarket leaderboard
+/// Candidate wallet from external leaderboards
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CandidateWallet {
     pub address: String,
-    pub proxy_wallet: Option<String>,
-    pub username: Option<String>,
-    pub profit: f64,
-    pub volume: f64,
-    pub markets_traded: u32,
     pub win_rate: f64,
-    pub positions: Option<u32>,
-    pub rank: Option<u32>,
+    pub closed_markets: u32,
+    pub avg_hold_days: Option<f64>,
+    pub max_drawdown: Option<f64>,
+    pub total_pnl: f64,
+    pub sharpe: Option<f64>,
+    pub source: String,
 }
 
 /// Filters for short-NO strategy wallet selection
-const MIN_WIN_RATE: f64 = 0.55;
-const MIN_MARKETS_TRADED: u32 = 30;
-const MIN_VOLUME_USD: f64 = 5000.0;
-const MIN_PROFIT_USD: f64 = 0.0;
-const MAX_PAGES: u32 = 5;
-const PAGE_SIZE: u32 = 100;
+const MIN_WIN_RATE: f64 = 0.60;
+const MIN_CLOSED_MARKETS: u32 = 50;
+const MAX_AVG_HOLD_DAYS: f64 = 7.0;
+const MIN_DRAWDOWN: f64 = -0.30;
 
-/// Fetch candidate wallets from Polymarket official API
+/// Fetch candidate wallets from Polysyncer and Struct.to
 pub async fn fetch_candidate_wallets() -> Result<Vec<String>> {
     let client = Client::builder()
         .user_agent("polymarket-no-bot/0.1")
@@ -36,52 +34,62 @@ pub async fn fetch_candidate_wallets() -> Result<Vec<String>> {
 
     let mut all_wallets: Vec<CandidateWallet> = Vec::new();
 
-    // Fetch from Polymarket Data API leaderboard (paginated)
-    for page in 0..MAX_PAGES {
-        let offset = page * PAGE_SIZE;
-        match fetch_leaderboard_page(&client, offset, PAGE_SIZE).await {
-            Ok(wallets) => {
-                let count = wallets.len();
-                info!(
-                    page = page + 1,
-                    count, "fetched wallets from Polymarket leaderboard"
-                );
-                if wallets.is_empty() {
-                    break;
-                }
-                all_wallets.extend(wallets);
-            }
-            Err(e) => {
-                warn!(page = page + 1, error = %e, "failed to fetch leaderboard page");
-                break;
-            }
+    // Fetch from Polysyncer
+    match fetch_polysyncer_wallets(&client).await {
+        Ok(wallets) => {
+            info!(count = wallets.len(), "fetched wallets from Polysyncer");
+            all_wallets.extend(wallets);
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to fetch Polysyncer wallets");
         }
     }
 
-    info!(
-        total = all_wallets.len(),
-        "total candidate wallets before filtering"
-    );
+    // Fetch from Struct.to
+    match fetch_struct_wallets(&client).await {
+        Ok(wallets) => {
+            info!(count = wallets.len(), "fetched wallets from Struct.to");
+            all_wallets.extend(wallets);
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to fetch Struct.to wallets");
+        }
+    }
 
-    // Apply filters for short-NO strategy
+    let total = all_wallets.len();
+    info!(total, "total candidate wallets before filtering");
+
+    // Apply filters
     let filtered: Vec<CandidateWallet> = all_wallets
         .into_iter()
         .filter(|w| passes_filters(w))
         .collect();
 
     info!(
-        passed = filtered.len(),
-        "wallets passing filters"
+        total_seen = total,
+        passed_filters = filtered.len(),
+        "wallet discovery: filtered candidate wallets with high winrate"
     );
 
-    // Sort by composite score: win_rate * log(volume) * profit_factor
+    // Sort by Sharpe (if available), then win_rate, then total_pnl
     let mut sorted = filtered;
     sorted.sort_by(|a, b| {
-        let score_a = compute_score(a);
-        let score_b = compute_score(b);
-        score_b
-            .partial_cmp(&score_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        // Prefer higher Sharpe
+        let sharpe_cmp = b.sharpe.unwrap_or(f64::NEG_INFINITY)
+            .partial_cmp(&a.sharpe.unwrap_or(f64::NEG_INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal);
+        if sharpe_cmp != std::cmp::Ordering::Equal {
+            return sharpe_cmp;
+        }
+
+        // Then win_rate
+        let wr_cmp = b.win_rate.partial_cmp(&a.win_rate).unwrap_or(std::cmp::Ordering::Equal);
+        if wr_cmp != std::cmp::Ordering::Equal {
+            return wr_cmp;
+        }
+
+        // Then total_pnl
+        b.total_pnl.partial_cmp(&a.total_pnl).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Log top 10
@@ -90,11 +98,11 @@ pub async fn fetch_candidate_wallets() -> Result<Vec<String>> {
         info!(
             rank = i + 1,
             wallet = %w.address,
-            username = ?w.username,
-            profit = w.profit,
-            volume = w.volume,
+            source = %w.source,
             win_rate = format!("{:.1}%", w.win_rate * 100.0),
-            markets = w.markets_traded,
+            closed_markets = w.closed_markets,
+            total_pnl = w.total_pnl,
+            sharpe = ?w.sharpe,
             "top candidate wallet"
         );
     }
@@ -103,69 +111,256 @@ pub async fn fetch_candidate_wallets() -> Result<Vec<String>> {
     Ok(sorted.into_iter().map(|w| w.address.to_lowercase()).collect())
 }
 
-/// Fetch a single page from Polymarket leaderboard API
-async fn fetch_leaderboard_page(
-    client: &Client,
-    offset: u32,
-    limit: u32,
-) -> Result<Vec<CandidateWallet>> {
-    // Polymarket Data API leaderboard endpoint
-    let url = format!(
-        "https://data-api.polymarket.com/leaderboard?window=all&limit={}&offset={}",
-        limit, offset
-    );
-
+/// Fetch wallets from Polysyncer leaderboard
+async fn fetch_polysyncer_wallets(client: &Client) -> Result<Vec<CandidateWallet>> {
+    let url = "https://www.polysyncer.com/leaderboard";
     let resp = client
-        .get(&url)
+        .get(url)
         .send()
         .await
-        .context("fetching Polymarket leaderboard")?;
+        .context("fetching Polysyncer leaderboard")?;
 
     if !resp.status().is_success() {
-        anyhow::bail!("Polymarket API returned status {}", resp.status());
+        anyhow::bail!("Polysyncer returned status {}", resp.status());
     }
 
-    let entries: Vec<LeaderboardEntry> = resp
-        .json()
+    let html = resp.text().await.context("reading Polysyncer response")?;
+    parse_polysyncer_html(&html)
+}
+
+/// Parse Polysyncer leaderboard HTML
+fn parse_polysyncer_html(html: &str) -> Result<Vec<CandidateWallet>> {
+    let document = Html::parse_document(html);
+    let mut wallets = Vec::new();
+
+    // Polysyncer uses table rows with trader data
+    let row_selector = Selector::parse("table tbody tr, .leaderboard-row, .trader-row")
+        .unwrap_or(Selector::parse("tr").unwrap());
+    let cell_selector = Selector::parse("td").unwrap();
+
+    for row in document.select(&row_selector) {
+        let cells: Vec<_> = row.select(&cell_selector).collect();
+        if cells.len() < 4 {
+            continue;
+        }
+
+        // Try to extract wallet address
+        let address = extract_address_from_row(&row, &cells);
+        if address.is_none() {
+            continue;
+        }
+        let address = address.unwrap();
+
+        // Parse metrics from cells (indices vary by site structure)
+        let win_rate = parse_cell_f64(&cells, 2).or_else(|| parse_cell_f64(&cells, 3))
+            .map(|v| if v > 1.0 { v / 100.0 } else { v });
+        let closed_markets = parse_cell_u32(&cells, 3).or_else(|| parse_cell_u32(&cells, 4));
+        let sharpe = parse_cell_f64(&cells, 5);
+        let drawdown = parse_cell_f64(&cells, 6).map(|v| if v > 0.0 { -v } else { v });
+        let pnl = parse_cell_f64(&cells, 7).or_else(|| parse_cell_f64(&cells, 4));
+
+        wallets.push(CandidateWallet {
+            address,
+            win_rate: win_rate.unwrap_or(0.0),
+            closed_markets: closed_markets.unwrap_or(0),
+            avg_hold_days: None,
+            max_drawdown: drawdown,
+            total_pnl: pnl.unwrap_or(0.0),
+            sharpe,
+            source: "polysyncer".to_string(),
+        });
+    }
+
+    Ok(wallets)
+}
+
+/// Fetch wallets from Struct.to traders page
+async fn fetch_struct_wallets(client: &Client) -> Result<Vec<CandidateWallet>> {
+    let url = "https://explorer.struct.to/traders?platform=polymarket";
+    let resp = client
+        .get(url)
+        .send()
         .await
-        .context("parsing Polymarket leaderboard JSON")?;
+        .context("fetching Struct.to traders")?;
 
-    Ok(entries
-        .into_iter()
-        .enumerate()
-        .map(|(i, e)| CandidateWallet {
-            address: e.proxy_wallet.clone().unwrap_or_else(|| e.address.clone()),
-            proxy_wallet: e.proxy_wallet.clone(),
-            username: e.username.clone(),
-            profit: e.profit.unwrap_or(0.0),
-            volume: e.volume.unwrap_or(0.0),
-            markets_traded: e.markets_traded.unwrap_or(0),
-            win_rate: e.win_rate.unwrap_or(0.0),
-            positions: e.positions,
-            rank: Some(offset + i as u32 + 1),
-        })
-        .collect())
+    if !resp.status().is_success() {
+        anyhow::bail!("Struct.to returned status {}", resp.status());
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if content_type.contains("application/json") {
+        let json: serde_json::Value = resp.json().await?;
+        parse_struct_json(&json)
+    } else {
+        let html = resp.text().await?;
+        parse_struct_html(&html)
+    }
 }
 
-/// Polymarket leaderboard API response entry
-#[derive(Debug, Deserialize)]
-struct LeaderboardEntry {
-    #[serde(alias = "proxyWallet")]
-    proxy_wallet: Option<String>,
-    address: String,
-    username: Option<String>,
-    profit: Option<f64>,
-    volume: Option<f64>,
-    #[serde(alias = "marketsTraded")]
-    markets_traded: Option<u32>,
-    #[serde(alias = "winRate")]
-    win_rate: Option<f64>,
-    positions: Option<u32>,
+/// Parse Struct.to JSON response
+fn parse_struct_json(json: &serde_json::Value) -> Result<Vec<CandidateWallet>> {
+    let mut wallets = Vec::new();
+
+    let entries = json
+        .get("data")
+        .or_else(|| json.get("traders"))
+        .and_then(|v| v.as_array())
+        .or_else(|| json.as_array())
+        .context("could not find traders array in JSON")?;
+
+    for entry in entries {
+        let address = entry
+            .get("address")
+            .or_else(|| entry.get("wallet"))
+            .or_else(|| entry.get("user"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if address.is_none() {
+            continue;
+        }
+
+        wallets.push(CandidateWallet {
+            address: address.unwrap(),
+            win_rate: entry.get("win_rate").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            closed_markets: entry
+                .get("closed_markets")
+                .or_else(|| entry.get("markets"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .unwrap_or(0),
+            avg_hold_days: entry.get("avg_hold_days").and_then(|v| v.as_f64()),
+            max_drawdown: entry.get("max_drawdown").and_then(|v| v.as_f64()),
+            total_pnl: entry
+                .get("total_pnl")
+                .or_else(|| entry.get("pnl"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            sharpe: entry.get("sharpe").and_then(|v| v.as_f64()),
+            source: "struct_to".to_string(),
+        });
+    }
+
+    Ok(wallets)
 }
 
-/// Check if a wallet passes filters for short-NO strategy
+/// Parse Struct.to HTML
+fn parse_struct_html(html: &str) -> Result<Vec<CandidateWallet>> {
+    let document = Html::parse_document(html);
+    let mut wallets = Vec::new();
+
+    let row_selector = Selector::parse("table tbody tr, .trader-row, .leaderboard-item").unwrap();
+    let cell_selector = Selector::parse("td, .metric, .stat").unwrap();
+
+    for row in document.select(&row_selector) {
+        let cells: Vec<_> = row.select(&cell_selector).collect();
+        if cells.len() < 3 {
+            continue;
+        }
+
+        let address = extract_address_from_row(&row, &cells);
+        if address.is_none() {
+            continue;
+        }
+
+        wallets.push(CandidateWallet {
+            address: address.unwrap(),
+            win_rate: parse_cell_f64(&cells, 2).map(|v| if v > 1.0 { v / 100.0 } else { v }).unwrap_or(0.0),
+            closed_markets: parse_cell_u32(&cells, 3).unwrap_or(0),
+            avg_hold_days: parse_cell_f64(&cells, 4),
+            max_drawdown: parse_cell_f64(&cells, 5),
+            total_pnl: parse_cell_f64(&cells, 6).unwrap_or(0.0),
+            sharpe: parse_cell_f64(&cells, 7),
+            source: "struct_to".to_string(),
+        });
+    }
+
+    Ok(wallets)
+}
+
+/// Extract wallet address from row/cells
+fn extract_address_from_row(
+    row: &scraper::ElementRef,
+    cells: &[scraper::ElementRef],
+) -> Option<String> {
+    // Try data attributes first
+    if let Some(addr) = row.value().attr("data-wallet")
+        .or_else(|| row.value().attr("data-address"))
+        .or_else(|| row.value().attr("data-trader"))
+    {
+        if addr.starts_with("0x") && addr.len() == 42 {
+            return Some(addr.to_string());
+        }
+    }
+
+    // Try links
+    let link_selector = Selector::parse("a[href*='0x']").unwrap();
+    for link in row.select(&link_selector) {
+        if let Some(href) = link.value().attr("href") {
+            if let Some(addr) = extract_address_from_url(href) {
+                return Some(addr);
+            }
+        }
+    }
+
+    // Try cell text content
+    for cell in cells.iter().take(3) {
+        let text = cell.text().collect::<String>();
+        if text.starts_with("0x") && text.len() >= 42 {
+            let addr = &text[..42];
+            if addr.starts_with("0x") {
+                return Some(addr.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract address from URL
+fn extract_address_from_url(url: &str) -> Option<String> {
+    let start = url.find("0x")?;
+    let addr = &url[start..];
+    if addr.len() >= 42 {
+        let addr = &addr[..42];
+        if addr.starts_with("0x") {
+            return Some(addr.to_string());
+        }
+    }
+    None
+}
+
+/// Parse f64 from cell text
+fn parse_cell_f64(cells: &[scraper::ElementRef], idx: usize) -> Option<f64> {
+    cells.get(idx).and_then(|cell| {
+        let text = cell.text().collect::<String>();
+        let cleaned = text
+            .replace('$', "")
+            .replace(',', "")
+            .replace('%', "")
+            .trim()
+            .to_string();
+        cleaned.parse().ok()
+    })
+}
+
+/// Parse u32 from cell text
+fn parse_cell_u32(cells: &[scraper::ElementRef], idx: usize) -> Option<u32> {
+    cells.get(idx).and_then(|cell| {
+        let text = cell.text().collect::<String>();
+        let cleaned = text.replace(',', "").trim().to_string();
+        cleaned.parse().ok()
+    })
+}
+
+/// Check if a wallet passes filters
 fn passes_filters(w: &CandidateWallet) -> bool {
-    // Win rate must be >= 55%
+    // Win rate must be >= 60%
     if w.win_rate < MIN_WIN_RATE {
         debug!(
             wallet = %w.address,
@@ -175,47 +370,41 @@ fn passes_filters(w: &CandidateWallet) -> bool {
         return false;
     }
 
-    // Must have traded in enough markets
-    if w.markets_traded < MIN_MARKETS_TRADED {
+    // Must have at least 50 closed markets
+    if w.closed_markets < MIN_CLOSED_MARKETS {
         debug!(
             wallet = %w.address,
-            markets = w.markets_traded,
-            "rejecting: insufficient markets traded"
+            closed_markets = w.closed_markets,
+            "rejecting: insufficient closed markets"
         );
         return false;
     }
 
-    // Must have sufficient volume (not a small trader)
-    if w.volume < MIN_VOLUME_USD {
-        debug!(
-            wallet = %w.address,
-            volume = w.volume,
-            "rejecting: low volume"
-        );
-        return false;
+    // Average hold filter (if available)
+    if let Some(hold) = w.avg_hold_days {
+        if hold > MAX_AVG_HOLD_DAYS {
+            debug!(
+                wallet = %w.address,
+                avg_hold = hold,
+                "rejecting: long avg hold"
+            );
+            return false;
+        }
     }
 
-    // Must be profitable
-    if w.profit < MIN_PROFIT_USD {
-        debug!(
-            wallet = %w.address,
-            profit = w.profit,
-            "rejecting: not profitable"
-        );
-        return false;
+    // Max drawdown filter (if available)
+    if let Some(dd) = w.max_drawdown {
+        if dd < MIN_DRAWDOWN {
+            debug!(
+                wallet = %w.address,
+                drawdown = dd,
+                "rejecting: excessive drawdown"
+            );
+            return false;
+        }
     }
 
     true
-}
-
-/// Compute composite score for ranking wallets
-/// Higher is better: combines win rate, volume (log scale), and profit
-fn compute_score(w: &CandidateWallet) -> f64 {
-    let win_factor = w.win_rate.powi(2); // Square to emphasize high win rates
-    let volume_factor = (w.volume / 1000.0).ln().max(0.0); // Log scale for volume
-    let profit_factor = (w.profit / 1000.0).sqrt().max(0.0); // Sqrt for diminishing returns
-
-    win_factor * volume_factor * (1.0 + profit_factor)
 }
 
 #[cfg(test)]
@@ -224,82 +413,69 @@ mod tests {
 
     fn sample_wallet(
         win_rate: f64,
-        markets: u32,
-        volume: f64,
-        profit: f64,
+        closed_markets: u32,
+        avg_hold: Option<f64>,
+        drawdown: Option<f64>,
     ) -> CandidateWallet {
         CandidateWallet {
             address: "0x1234567890123456789012345678901234567890".to_string(),
-            proxy_wallet: None,
-            username: Some("test_trader".to_string()),
-            profit,
-            volume,
-            markets_traded: markets,
             win_rate,
-            positions: Some(10),
-            rank: Some(1),
+            closed_markets,
+            avg_hold_days: avg_hold,
+            max_drawdown: drawdown,
+            total_pnl: 1000.0,
+            sharpe: Some(1.0),
+            source: "test".to_string(),
         }
     }
 
     #[test]
     fn test_passes_filters_good_wallet() {
-        let wallet = sample_wallet(0.65, 100, 50000.0, 5000.0);
+        let wallet = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
         assert!(passes_filters(&wallet));
     }
 
     #[test]
     fn test_rejects_low_win_rate() {
-        let wallet = sample_wallet(0.45, 100, 50000.0, 5000.0);
+        let wallet = sample_wallet(0.45, 100, Some(5.0), Some(-0.15));
         assert!(!passes_filters(&wallet));
     }
 
     #[test]
     fn test_rejects_insufficient_markets() {
-        let wallet = sample_wallet(0.65, 10, 50000.0, 5000.0);
+        let wallet = sample_wallet(0.65, 10, Some(5.0), Some(-0.15));
         assert!(!passes_filters(&wallet));
     }
 
     #[test]
-    fn test_rejects_low_volume() {
-        let wallet = sample_wallet(0.65, 100, 1000.0, 5000.0);
+    fn test_rejects_long_hold() {
+        let wallet = sample_wallet(0.65, 100, Some(10.0), Some(-0.15));
         assert!(!passes_filters(&wallet));
     }
 
     #[test]
-    fn test_rejects_negative_profit() {
-        let wallet = sample_wallet(0.65, 100, 50000.0, -1000.0);
+    fn test_rejects_excessive_drawdown() {
+        let wallet = sample_wallet(0.65, 100, Some(5.0), Some(-0.40));
         assert!(!passes_filters(&wallet));
-    }
-
-    #[test]
-    fn test_compute_score_ordering() {
-        let high_wr = sample_wallet(0.80, 100, 50000.0, 10000.0);
-        let low_wr = sample_wallet(0.55, 100, 50000.0, 10000.0);
-        assert!(compute_score(&high_wr) > compute_score(&low_wr));
-
-        let high_vol = sample_wallet(0.65, 100, 100000.0, 10000.0);
-        let low_vol = sample_wallet(0.65, 100, 10000.0, 10000.0);
-        assert!(compute_score(&high_vol) > compute_score(&low_vol));
     }
 
     #[test]
     fn test_boundary_conditions() {
         // Exactly at minimum thresholds should pass
-        let boundary = sample_wallet(
-            MIN_WIN_RATE,
-            MIN_MARKETS_TRADED,
-            MIN_VOLUME_USD,
-            MIN_PROFIT_USD,
-        );
+        let boundary = sample_wallet(MIN_WIN_RATE, MIN_CLOSED_MARKETS, Some(MAX_AVG_HOLD_DAYS), Some(MIN_DRAWDOWN));
         assert!(passes_filters(&boundary));
 
         // Just below minimums should fail
-        let below_wr = sample_wallet(
-            MIN_WIN_RATE - 0.01,
-            MIN_MARKETS_TRADED,
-            MIN_VOLUME_USD,
-            MIN_PROFIT_USD,
-        );
+        let below_wr = sample_wallet(MIN_WIN_RATE - 0.01, MIN_CLOSED_MARKETS, Some(MAX_AVG_HOLD_DAYS), Some(MIN_DRAWDOWN));
         assert!(!passes_filters(&below_wr));
+    }
+
+    #[test]
+    fn test_extract_address_from_url() {
+        assert_eq!(
+            extract_address_from_url("https://polymarket.com/profile/0x1234567890123456789012345678901234567890"),
+            Some("0x1234567890123456789012345678901234567890".to_string())
+        );
+        assert_eq!(extract_address_from_url("https://example.com"), None);
     }
 }
