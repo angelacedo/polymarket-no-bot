@@ -40,23 +40,36 @@ impl CopyTradeMonitor {
         }
     }
 
-    /// Migrate wallets from config to database if database is empty
+    // NOTE: Config wallets are only migrated ONCE (first run).
+    // To add/remove wallets after first run, use the Dashboard UI
+    // or POST/DELETE /api/wallets — changes to [copytrade.wallets] in
+    // TOML will be IGNORED after first run.
+    // To force a fresh migration: DELETE FROM migration_flags WHERE key='config_wallets_migrated';
     fn migrate_config_wallets(&self) {
-        // Check if DB has any wallets
-        if let Ok(existing) = self.storage.list_wallets() {
-            if !existing.is_empty() {
-                info!(count = existing.len(), "copytrade: using existing wallets from database");
+        // Check if migration already done
+        match self.storage.migration_flag_exists("config_wallets_migrated") {
+            Ok(true) => {
+                info!("config wallets already migrated, skipping");
                 return;
+            }
+            Ok(false) => {
+                // Proceed with migration
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to check migration flag, proceeding with migration");
             }
         }
 
         // Migrate wallets from config
         let config_wallets = &self.config.copytrade.wallets;
         if config_wallets.is_empty() {
+            info!("no config wallets to migrate");
+            // Mark as migrated even if empty to avoid retrying
+            let _ = self.storage.set_migration_flag("config_wallets_migrated", "true");
             return;
         }
 
-        info!(count = config_wallets.len(), "copytrade: migrating wallets from config to database");
+        info!(count = config_wallets.len(), "migrating {} config wallets to DB for the first time", config_wallets.len());
         for w in config_wallets {
             let record = WalletRecord {
                 address: w.address.to_lowercase(),
@@ -73,6 +86,11 @@ impl CopyTradeMonitor {
             if let Err(e) = self.storage.add_wallet(&record) {
                 warn!(wallet = %w.address, error = %e, "failed to migrate wallet");
             }
+        }
+
+        // Mark migration as done
+        if let Err(e) = self.storage.set_migration_flag("config_wallets_migrated", "true") {
+            warn!(error = %e, "failed to set migration flag");
         }
     }
 

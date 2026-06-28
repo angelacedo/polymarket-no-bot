@@ -1,5 +1,6 @@
 const INIT_SQL: &str = include_str!("migrations/001_init.sql");
 const MIGRATION_002_SQL: &str = include_str!("migrations/002_wallets.sql");
+const MIGRATION_003_SQL: &str = include_str!("migrations/003_migration_flags.sql");
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,19 @@ fn migrate(conn: &Connection) -> Result<()> {
         .unwrap_or(false);
     if !has_wallets {
         conn.execute_batch(MIGRATION_002_SQL)?;
+    }
+
+    // Migration 003: migration_flags table
+    let has_flags: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='migration_flags'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_flags {
+        conn.execute_batch(MIGRATION_003_SQL)?;
     }
 
     Ok(())
@@ -549,6 +563,29 @@ impl Storage {
                 }
             })
             .collect())
+    }
+
+    // ─── Migration Flags ─────────────────────────────────────────────
+
+    /// Check if a migration flag exists in the database
+    pub fn migration_flag_exists(&self, key: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM migration_flags WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Set a migration flag in the database
+    pub fn set_migration_flag(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO migration_flags (key, value, migrated_at) VALUES (?1, ?2, ?3)",
+            params![key, value, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
     }
 }
 
