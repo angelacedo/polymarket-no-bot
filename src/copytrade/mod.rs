@@ -339,12 +339,12 @@ impl CopyTradeMonitor {
             return None;
         }
 
-        // INVARIANT: force all copytrade signals to NO side
         if trade.side != Side::No {
             debug!(
-                "copytrade signal overridden to NO (original was {:?}, wallet={}, market={})",
+                "copytrade: skipping non-NO trade (side={:?}, wallet={}, market={})",
                 trade.side, trade.wallet, trade.condition_id
             );
+            return None;
         }
 
         // Apply wallet-specific min_trade_size
