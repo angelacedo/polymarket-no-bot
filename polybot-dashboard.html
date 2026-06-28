@@ -316,6 +316,10 @@
     .tag-source.manual { background: rgba(96,165,250,0.15); color: var(--paper); }
     .tag-source.auto { background: rgba(34,211,238,0.15); color: var(--cyan); }
     .tag-source.disabled { background: var(--surface-3); color: var(--text-faint); }
+    .tag-eval { padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; cursor: help; }
+    .tag-eval.ok { background: rgba(52,211,153,0.15); color: var(--emerald); }
+    .tag-eval.weak { background: rgba(251,191,36,0.15); color: var(--amber); }
+    .tag-eval.error { background: rgba(244,114,138,0.15); color: var(--rose); }
 
     .demo-banner {
       display: none; padding: 10px 28px; background: rgba(251,191,36,0.08);
@@ -484,10 +488,16 @@
               </div>
             </div>
             <div class="card-body">
-              <button id="addWalletBtn" style="margin-bottom:16px;padding:8px 16px;border-radius:8px;border:1px solid var(--border-strong);background:var(--surface-2);color:var(--text);cursor:pointer;font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px;">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                Add wallet
-              </button>
+              <div style="display:flex;gap:8px;margin-bottom:16px;">
+                <button id="addWalletBtn" style="padding:8px 16px;border-radius:8px;border:1px solid var(--border-strong);background:var(--surface-2);color:var(--text);cursor:pointer;font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px;">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  Add wallet
+                </button>
+                <button id="evaluateWalletsBtn" style="padding:8px 16px;border-radius:8px;border:1px solid var(--border-strong);background:var(--surface-2);color:var(--text);cursor:pointer;font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px;">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+                  Evaluate wallets
+                </button>
+              </div>
               <div id="addWalletForm" style="display:none;margin-bottom:20px;padding:16px;background:var(--surface-2);border-radius:10px;border:1px solid var(--border);">
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
                   <div>
@@ -860,6 +870,7 @@
   // ─── Wallets ───────────────────────────────────────────────────────
 
   let walletFilter = 'all';
+  let walletEvaluations = {}; // address -> evaluation result
 
   function walletRow(w) {
     const sourceTag = w.source === 'manual'
@@ -869,6 +880,21 @@
     const label = w.label || esc(fmt.trunc(w.address, 16));
     const shortAddr = w.address.slice(0, 8) + '...' + w.address.slice(-6);
     const pnlCls = fmt.pnlClass(w.total_pnl || 0);
+    
+    // Evaluation badge
+    const evalResult = walletEvaluations[w.address.toLowerCase()];
+    let evalBadge = '';
+    if (evalResult) {
+      if (evalResult.status === 'OK') {
+        evalBadge = `<span class="tag-eval ok" title="Score: ${evalResult.score.toFixed(2)}">✓ OK</span>`;
+      } else if (evalResult.status === 'WEAK') {
+        const reasons = evalResult.reasons?.join('\n') || 'Underperforming';
+        evalBadge = `<span class="tag-eval weak" title="${esc(reasons)}">⚠ WEAK</span>`;
+      } else if (evalResult.status === 'ERROR') {
+        const reasons = evalResult.reasons?.join('\n') || 'Could not fetch metrics';
+        evalBadge = `<span class="tag-eval error" title="${esc(reasons)}">? ERROR</span>`;
+      }
+    }
 
     return `<div class="wallet-item" data-address="${esc(w.address)}">
       <div class="wallet-main">
@@ -876,6 +902,7 @@
           <span class="wallet-label">${label}</span>
           ${sourceTag}
           ${enabledTag}
+          ${evalBadge}
         </div>
         <div class="wallet-address" title="${esc(w.address)}">${shortAddr}</div>
         <div class="wallet-meta">
@@ -976,6 +1003,61 @@
     }
   }
 
+  async function evaluateWallets() {
+    const wallets = data.wallets || [];
+    if (wallets.length === 0) {
+      alert('No wallets to evaluate');
+      return;
+    }
+
+    const addresses = wallets.map(w => w.address).join(',');
+    const btn = $('evaluateWalletsBtn');
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<span style="animation: spin 1s linear infinite">⟳</span> Evaluating...';
+    btn.disabled = true;
+
+    try {
+      const r = await fetch(`${API}/api/wallets/evaluate?addresses=${encodeURIComponent(addresses)}`);
+      if (!r.ok) throw new Error(await r.text());
+      
+      const result = await r.json();
+      
+      // Store evaluations
+      walletEvaluations = {};
+      for (const eval_ of result.results) {
+        walletEvaluations[eval_.address.toLowerCase()] = eval_;
+      }
+      
+      // Re-render wallets to show badges
+      renderWallets();
+      
+      // Show summary
+      const okCount = result.results.filter(e => e.status === 'OK').length;
+      const weakCount = result.results.filter(e => e.status === 'WEAK').length;
+      const errorCount = result.results.filter(e => e.status === 'ERROR').length;
+      
+      let summary = `Evaluation complete:\n`;
+      summary += `✓ OK: ${okCount}\n`;
+      if (weakCount > 0) summary += `⚠ WEAK: ${weakCount}\n`;
+      if (errorCount > 0) summary += `? ERROR: ${errorCount}\n`;
+      
+      if (weakCount > 0) {
+        summary += `\nWeak wallets:\n`;
+        for (const eval_ of result.results.filter(e => e.status === 'WEAK')) {
+          const shortAddr = eval_.address.slice(0, 8) + '...' + eval_.address.slice(-6);
+          summary += `  ${shortAddr}: ${eval_.reasons?.join(', ') || 'underperforming'}\n`;
+        }
+      }
+      
+      alert(summary);
+    } catch (e) {
+      alert('Failed to evaluate wallets: ' + e.message);
+    } finally {
+      btn.innerHTML = originalText;
+      btn.disabled = false;
+    }
+  }
+
   // Make functions global for onclick handlers
   window.addWallet = addWallet;
   window.removeWallet = removeWallet;
@@ -1070,6 +1152,8 @@
     const form = $('addWalletForm');
     form.style.display = form.style.display === 'none' ? 'block' : 'none';
   };
+
+  $('evaluateWalletsBtn').onclick = evaluateWallets;
 
   $('saveWalletBtn').onclick = addWallet;
   $('cancelWalletBtn').onclick = () => {

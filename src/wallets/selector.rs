@@ -27,7 +27,7 @@ const MIN_DRAWDOWN: f64 = -0.30;
 
 /// Compute composite score for ranking wallets
 /// Higher is better: combines Sharpe, win_rate, PnL, and closed_markets
-fn compute_score(w: &CandidateWallet) -> f64 {
+pub fn compute_score(w: &CandidateWallet) -> f64 {
     // Sharpe (normalizado 0–1 via sigmoid) tiene el mayor peso
     let sharpe_score = w.sharpe.map(|s| 1.0 / (1.0 + (-s).exp())).unwrap_or(0.5);
     // win_rate directamente (ya en 0–1)
@@ -601,6 +601,99 @@ fn passes_filters(w: &CandidateWallet) -> bool {
     }
 
     true
+}
+
+/// Result of evaluating a wallet's quality
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletEvaluation {
+    pub address: String,
+    pub win_rate: Option<f64>,
+    pub closed_markets: Option<u32>,
+    pub avg_hold_days: Option<f64>,
+    pub max_drawdown: Option<f64>,
+    pub total_pnl: Option<f64>,
+    pub sharpe: Option<f64>,
+    pub score: f64,
+    pub status: String,
+    pub reasons: Vec<String>,
+}
+
+/// Evaluate a wallet's quality and return detailed results
+pub fn evaluate_wallet(w: &CandidateWallet) -> WalletEvaluation {
+    let mut reasons = Vec::new();
+    
+    if w.win_rate < MIN_WIN_RATE {
+        reasons.push(format!("win_rate {:.1}% < 60%", w.win_rate * 100.0));
+    }
+    
+    if w.closed_markets < MIN_CLOSED_MARKETS {
+        reasons.push(format!("closed_markets {} < {}", w.closed_markets, MIN_CLOSED_MARKETS));
+    }
+    
+    if let Some(hold) = w.avg_hold_days {
+        if hold > MAX_AVG_HOLD_DAYS {
+            reasons.push(format!("avg_hold_days {:.1} > {:.1}", hold, MAX_AVG_HOLD_DAYS));
+        }
+    }
+    
+    if let Some(dd) = w.max_drawdown {
+        if dd < MIN_DRAWDOWN {
+            reasons.push(format!("max_drawdown {:.1}% < {:.1}%", dd * 100.0, MIN_DRAWDOWN * 100.0));
+        }
+    }
+    
+    let status = if reasons.is_empty() { "OK".to_string() } else { "WEAK".to_string() };
+    
+    WalletEvaluation {
+        address: w.address.clone(),
+        win_rate: Some(w.win_rate),
+        closed_markets: Some(w.closed_markets),
+        avg_hold_days: w.avg_hold_days,
+        max_drawdown: w.max_drawdown,
+        total_pnl: Some(w.total_pnl),
+        sharpe: w.sharpe,
+        score: compute_score(w),
+        status,
+        reasons,
+    }
+}
+
+/// Fetch metrics for a specific wallet address from external sources
+pub async fn fetch_wallet_metrics(address: &str) -> Result<CandidateWallet> {
+    let client = Client::builder()
+        .user_agent("polymarket-no-bot/0.1")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("building HTTP client")?;
+    
+    let addr_lower = address.to_lowercase();
+    
+    // Try each source until we find the wallet
+    if let Ok(wallets) = fetch_polymarket_official_wallets(&client).await {
+        if let Some(w) = wallets.into_iter().find(|w| w.address.to_lowercase() == addr_lower) {
+            return Ok(w);
+        }
+    }
+    
+    if let Ok(wallets) = fetch_polyburg_wallets(&client).await {
+        if let Some(w) = wallets.into_iter().find(|w| w.address.to_lowercase() == addr_lower) {
+            return Ok(w);
+        }
+    }
+    
+    if let Ok(wallets) = fetch_polyscalping_wallets(&client).await {
+        if let Some(w) = wallets.into_iter().find(|w| w.address.to_lowercase() == addr_lower) {
+            return Ok(w);
+        }
+    }
+    
+    if let Ok(wallets) = fetch_polyalerthub_wallets(&client).await {
+        if let Some(w) = wallets.into_iter().find(|w| w.address.to_lowercase() == addr_lower) {
+            return Ok(w);
+        }
+    }
+    
+    anyhow::bail!("wallet {} not found in any external source", address)
 }
 
 #[cfg(test)]

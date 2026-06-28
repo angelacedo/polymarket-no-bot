@@ -1,6 +1,7 @@
 const INIT_SQL: &str = include_str!("migrations/001_init.sql");
 const MIGRATION_002_SQL: &str = include_str!("migrations/002_wallets.sql");
 const MIGRATION_003_SQL: &str = include_str!("migrations/003_migration_flags.sql");
+const MIGRATION_004_SQL: &str = include_str!("migrations/004_wallet_evaluation.sql");
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -55,6 +56,19 @@ fn migrate(conn: &Connection) -> Result<()> {
         .unwrap_or(false);
     if !has_flags {
         conn.execute_batch(MIGRATION_003_SQL)?;
+    }
+
+    // Migration 004: wallet evaluation columns
+    let has_eval_cols: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('copy_wallets') WHERE name = 'last_evaluation_status'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_eval_cols {
+        conn.execute_batch(MIGRATION_004_SQL)?;
     }
 
     Ok(())
@@ -586,6 +600,51 @@ impl Storage {
             params![key, value, Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+
+    // ─── Wallet Evaluation ───────────────────────────────────────────
+
+    /// Update wallet evaluation status
+    pub fn update_wallet_evaluation(
+        &self,
+        address: &str,
+        status: &str,
+        consecutive_weak_count: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE copy_wallets SET last_evaluation_status = ?1, last_evaluation_at = ?2, consecutive_weak_count = ?3 WHERE address = ?4",
+            params![status, Utc::now().to_rfc3339(), consecutive_weak_count, address.to_lowercase()],
+        )?;
+        Ok(())
+    }
+
+    /// Get wallets that need evaluation (manual wallets without recent evaluation)
+    pub fn get_wallets_for_evaluation(&self) -> Result<Vec<WalletRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT address, label, scale_factor, max_daily_exposure_usd, min_trade_size_usd,
+                    allowed_categories, blocked_categories, source, enabled, created_at
+             FROM copy_wallets WHERE source = 'manual' AND enabled = 1",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let allowed_json: String = row.get(5)?;
+            let blocked_json: String = row.get(6)?;
+            let enabled_int: i64 = row.get(8)?;
+            Ok(WalletRecord {
+                address: row.get(0)?,
+                label: row.get(1)?,
+                scale_factor: row.get(2)?,
+                max_daily_exposure_usd: row.get(3)?,
+                min_trade_size_usd: row.get(4)?,
+                allowed_categories: serde_json::from_str(&allowed_json).unwrap_or_default(),
+                blocked_categories: serde_json::from_str(&blocked_json).unwrap_or_default(),
+                source: row.get(7)?,
+                enabled: enabled_int != 0,
+                created_at: parse_ts(row.get(9)?),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 

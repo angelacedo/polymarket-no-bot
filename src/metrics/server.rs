@@ -16,6 +16,7 @@ use crate::execution::ExecutionBackend;
 use crate::risk::RiskEngine;
 use crate::storage::Storage;
 use crate::types::{ExecutionMode, LatencyTracker, TradeView, TuningAuditRecord, WalletRecord, WalletView};
+use crate::wallets::{CandidateWallet, WalletEvaluation, evaluate_wallet, fetch_wallet_metrics};
 
 use super::MetricsRegistry;
 
@@ -61,6 +62,7 @@ impl MetricsServer {
             .route("/api/status", get(json_status))
             .route("/api/admin/reset", post(admin_reset))
             .route("/api/wallets", get(list_wallets).post(add_wallet))
+            .route("/api/wallets/evaluate", get(evaluate_wallets_endpoint))
             .route("/api/wallets/{address}", delete(remove_wallet).patch(update_wallet))
             .route("/dashboard", get(dashboard_page))
             .with_state(state);
@@ -319,4 +321,75 @@ async fn update_wallet(
         Ok(false) => (StatusCode::NOT_FOUND, "wallet not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+// ─── Wallet Evaluation Endpoint ───────────────────────────────────────
+
+#[derive(Deserialize)]
+struct EvaluateWalletsQuery {
+    addresses: String,
+}
+
+#[derive(Serialize)]
+struct EvaluateWalletsResponse {
+    evaluated_at: String,
+    results: Vec<WalletEvaluation>,
+}
+
+async fn evaluate_wallets_endpoint(
+    axum::extract::Query(query): axum::extract::Query<EvaluateWalletsQuery>,
+) -> impl IntoResponse {
+    let addresses: Vec<&str> = query.addresses.split(',').map(|s| s.trim()).collect();
+    
+    if addresses.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no addresses provided").into_response();
+    }
+
+    let mut results = Vec::new();
+    
+    for address in addresses {
+        if !address.starts_with("0x") || address.len() != 42 {
+            results.push(WalletEvaluation {
+                address: address.to_string(),
+                win_rate: None,
+                closed_markets: None,
+                avg_hold_days: None,
+                max_drawdown: None,
+                total_pnl: None,
+                sharpe: None,
+                score: 0.0,
+                status: "ERROR".to_string(),
+                reasons: vec!["invalid address format".to_string()],
+            });
+            continue;
+        }
+
+        match fetch_wallet_metrics(address).await {
+            Ok(wallet) => {
+                let evaluation = evaluate_wallet(&wallet);
+                results.push(evaluation);
+            }
+            Err(e) => {
+                results.push(WalletEvaluation {
+                    address: address.to_string(),
+                    win_rate: None,
+                    closed_markets: None,
+                    avg_hold_days: None,
+                    max_drawdown: None,
+                    total_pnl: None,
+                    sharpe: None,
+                    score: 0.0,
+                    status: "ERROR".to_string(),
+                    reasons: vec![format!("failed to fetch metrics: {}", e)],
+                });
+            }
+        }
+    }
+
+    let response = EvaluateWalletsResponse {
+        evaluated_at: chrono::Utc::now().to_rfc3339(),
+        results,
+    };
+
+    axum::Json(response).into_response()
 }

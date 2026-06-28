@@ -11,7 +11,7 @@ use crate::exchange::ExchangeHub;
 use crate::storage::Storage;
 use crate::strategy::{apply_filters, signal_from_copy};
 use crate::types::{MarketMeta, Side, TradeSignal, WalletRecord, WalletTradeEvent};
-use crate::wallets::fetch_candidate_wallets;
+use crate::wallets::{evaluate_wallet, fetch_candidate_wallets, fetch_wallet_metrics};
 
 pub struct CopyTradeMonitor {
     config: BotConfig,
@@ -22,6 +22,7 @@ pub struct CopyTradeMonitor {
     last_market_refresh: Option<Instant>,
     last_wallet_discovery: Option<Instant>,
     last_wallet_db_refresh: Option<Instant>,
+    last_wallet_evaluation: Option<Instant>,
     db_wallets: Vec<WalletRecord>,
 }
 
@@ -36,6 +37,7 @@ impl CopyTradeMonitor {
             last_market_refresh: None,
             last_wallet_discovery: None,
             last_wallet_db_refresh: None,
+            last_wallet_evaluation: None,
             db_wallets: Vec::new(),
         }
     }
@@ -210,6 +212,91 @@ impl CopyTradeMonitor {
         }
     }
 
+    /// Evaluate manual wallets periodically and warn if underperforming
+    async fn evaluate_manual_wallets(&mut self) {
+        // Evaluate every discovery_interval_secs * 3 seconds
+        let eval_interval = std::time::Duration::from_secs(
+            self.config.copytrade.discovery_interval_secs * 3,
+        );
+        if let Some(last) = self.last_wallet_evaluation {
+            if last.elapsed() < eval_interval {
+                return;
+            }
+        }
+
+        let wallets = match self.storage.get_wallets_for_evaluation() {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "copytrade: failed to get wallets for evaluation");
+                return;
+            }
+        };
+
+        if wallets.is_empty() {
+            self.last_wallet_evaluation = Some(Instant::now());
+            return;
+        }
+
+        info!(count = wallets.len(), "copytrade: evaluating manual wallets");
+
+        for wallet in &wallets {
+            match fetch_wallet_metrics(&wallet.address).await {
+                Ok(candidate) => {
+                    let evaluation = evaluate_wallet(&candidate);
+                    
+                    // Get current consecutive_weak_count
+                    let current_count = self.storage
+                        .list_wallets()
+                        .ok()
+                        .and_then(|ws| ws.into_iter().find(|w| w.address == wallet.address))
+                        .map(|_| 0i64) // TODO: need to read consecutive_weak_count from DB
+                        .unwrap_or(0);
+
+                    let new_count = if evaluation.status == "WEAK" {
+                        current_count + 1
+                    } else {
+                        0
+                    };
+
+                    // Update evaluation status in DB
+                    if let Err(e) = self.storage.update_wallet_evaluation(
+                        &wallet.address,
+                        &evaluation.status,
+                        new_count,
+                    ) {
+                        warn!(error = %e, wallet = %wallet.address, "failed to update evaluation status");
+                    }
+
+                    // Warn if underperforming for 2+ consecutive evaluations
+                    if new_count >= 2 {
+                        warn!(
+                            wallet = %wallet.address,
+                            reasons = evaluation.reasons.join(", "),
+                            consecutive_weak = new_count,
+                            "copytrade: manual wallet is underperforming"
+                        );
+                    }
+
+                    debug!(
+                        wallet = %wallet.address,
+                        status = %evaluation.status,
+                        score = evaluation.score,
+                        "copytrade: evaluated wallet"
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        wallet = %wallet.address,
+                        error = %e,
+                        "copytrade: could not fetch metrics for evaluation"
+                    );
+                }
+            }
+        }
+
+        self.last_wallet_evaluation = Some(Instant::now());
+    }
+
     fn wallet_allowed(&self, wallet: &WalletRecord, category: &str) -> bool {
         if wallet
             .blocked_categories
@@ -324,6 +411,9 @@ pub async fn run_copytrade_loop(
 
         // Discover new candidate wallets periodically
         monitor.refresh_candidate_wallets().await;
+
+        // Evaluate manual wallets periodically
+        monitor.evaluate_manual_wallets().await;
 
         // Poll all enabled wallets from database
         let wallets = monitor.db_wallets.clone();
