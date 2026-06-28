@@ -746,8 +746,9 @@ pub async fn fetch_wallet_metrics(address: &str) -> Result<CandidateWallet> {
         .build()
         .context("building HTTP client")?;
     
+    // Use positions endpoint for better metrics (includes PnL, outcomes, resolved status)
     let url = format!(
-        "https://data-api.polymarket.com/activity?user={}&limit=500",
+        "https://data-api.polymarket.com/positions?user={}&limit=500",
         address
     );
     
@@ -755,88 +756,77 @@ pub async fn fetch_wallet_metrics(address: &str) -> Result<CandidateWallet> {
         .get(&url)
         .send()
         .await
-        .context("fetching wallet activity from Data API")?;
+        .context("fetching wallet positions from Data API")?;
     
     if !resp.status().is_success() {
         anyhow::bail!("Data API returned status {}", resp.status());
     }
     
-    let trades: Vec<serde_json::Value> = resp
+    let positions: Vec<serde_json::Value> = resp
         .json()
         .await
         .context("parsing Data API response")?;
     
-    if trades.is_empty() {
-        anyhow::bail!("no activity found for wallet {}", address);
+    if positions.is_empty() {
+        anyhow::bail!("no positions found for wallet {}", address);
     }
     
-    // Calculate metrics from activity data
-    let total_trades = trades.len() as f64;
+    // Calculate metrics from positions data
+    let total_positions = positions.len() as f64;
     
-    // NO trade ratio
-    let no_trades: Vec<_> = trades.iter()
-        .filter(|t| t.get("outcome").and_then(|v| v.as_str()) == Some("No"))
+    // NO trade ratio (positions with outcome="No")
+    let no_positions: Vec<_> = positions.iter()
+        .filter(|p| p.get("outcome").and_then(|v| v.as_str()) == Some("No"))
         .collect();
-    let no_trade_ratio = no_trades.len() as f64 / total_trades;
+    let no_trade_ratio = no_positions.len() as f64 / total_positions;
     
-    // Resolved trades for win rate calculation
-    let resolved_trades: Vec<_> = trades.iter()
-        .filter(|t| t.get("resolved").and_then(|v| v.as_bool()) == Some(true))
+    // Resolved positions (redeemable=true or market ended)
+    let resolved_positions: Vec<_> = positions.iter()
+        .filter(|p| p.get("redeemable").and_then(|v| v.as_bool()) == Some(true))
         .collect();
     
-    let win_rate = if resolved_trades.is_empty() {
+    // Win rate (resolved positions with positive PnL)
+    let win_rate = if resolved_positions.is_empty() {
         0.0
     } else {
-        let wins = resolved_trades.iter()
-            .filter(|t| t.get("won").and_then(|v| v.as_bool()) == Some(true))
+        let wins = resolved_positions.iter()
+            .filter(|p| {
+                p.get("cashPnl").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0
+            })
             .count() as f64;
-        wins / resolved_trades.len() as f64
+        wins / resolved_positions.len() as f64
     };
     
-    // NO win rate
-    let resolved_no_trades: Vec<_> = no_trades.iter()
-        .filter(|t| t.get("resolved").and_then(|v| v.as_bool()) == Some(true))
+    // NO win rate (resolved NO positions with positive PnL)
+    let resolved_no_positions: Vec<_> = no_positions.iter()
+        .filter(|p| p.get("redeemable").and_then(|v| v.as_bool()) == Some(true))
         .collect();
     
-    let no_win_rate = if resolved_no_trades.is_empty() {
+    let no_win_rate = if resolved_no_positions.is_empty() {
         None
     } else {
-        let no_wins = resolved_no_trades.iter()
-            .filter(|t| t.get("won").and_then(|v| v.as_bool()) == Some(true))
+        let no_wins = resolved_no_positions.iter()
+            .filter(|p| {
+                p.get("cashPnl").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0
+            })
             .count() as f64;
-        Some(no_wins / resolved_no_trades.len() as f64)
+        Some(no_wins / resolved_no_positions.len() as f64)
     };
     
-    // Closed markets (unique condition_ids with resolved=true)
-    let closed_markets = resolved_trades.iter()
-        .filter_map(|t| t.get("condition_id").and_then(|v| v.as_str()))
+    // Closed markets (unique conditionIds from resolved positions)
+    let closed_markets = resolved_positions.iter()
+        .filter_map(|p| p.get("conditionId").and_then(|v| v.as_str()))
         .collect::<std::collections::HashSet<_>>()
         .len() as u32;
     
-    // Average hold time (in days)
-    let avg_hold_days = {
-        let hold_times: Vec<f64> = resolved_trades.iter()
-            .filter_map(|t| {
-                let created = t.get("created_at").and_then(|v| v.as_str())?;
-                let resolved = t.get("resolved_at").and_then(|v| v.as_str())?;
-                let created_dt = DateTime::parse_from_rfc3339(created).ok()?;
-                let resolved_dt = DateTime::parse_from_rfc3339(resolved).ok()?;
-                let days = (resolved_dt - created_dt).num_seconds() as f64 / 86400.0;
-                Some(days)
-            })
-            .collect();
-        
-        if hold_times.is_empty() {
-            None
-        } else {
-            Some(hold_times.iter().sum::<f64>() / hold_times.len() as f64)
-        }
-    };
-    
-    // Total PnL (sum of profit across resolved trades)
-    let total_pnl = resolved_trades.iter()
-        .filter_map(|t| t.get("profit").and_then(|v| v.as_f64()))
+    // Total PnL (sum of cashPnl across all positions)
+    let total_pnl = positions.iter()
+        .filter_map(|p| p.get("cashPnl").and_then(|v| v.as_f64()))
         .sum::<f64>();
+    
+    // Average hold time (not directly available, estimate from position data)
+    // Since we don't have created_at/resolved_at, we'll leave this as None
+    let avg_hold_days = None;
     
     Ok(CandidateWallet {
         address: address.to_string(),
