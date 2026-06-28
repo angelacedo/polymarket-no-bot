@@ -137,10 +137,11 @@ async fn run_bot(config_path: PathBuf, mode_override: Option<String>) -> Result<
     let copy_handle = {
         let cfg = config.clone();
         let hub = hub.clone();
+        let storage_for_copy = storage.clone();
         let markets = markets_shared.clone();
         let signal_tx = signal_tx.clone();
         tokio::spawn(async move {
-            run_copytrade_loop(cfg, hub, markets, signal_tx).await;
+            run_copytrade_loop(cfg, hub, storage_for_copy, markets, signal_tx).await;
         })
     };
 

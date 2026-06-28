@@ -1,4 +1,5 @@
 const INIT_SQL: &str = include_str!("migrations/001_init.sql");
+const MIGRATION_002_SQL: &str = include_str!("migrations/002_wallets.sql");
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -9,7 +10,7 @@ use rusqlite::{Connection, params};
 
 use crate::types::{
     ExecutionMode, OrderRequest, OrderResult, OrderStatus, PnlSnapshot, Position, Side,
-    TradeView, TuningAuditRecord, TradeRecord,
+    TradeView, TuningAuditRecord, TradeRecord, WalletRecord, WalletView,
 };
 
 const POLYMARKET_EVENT_BASE: &str = "https://polymarket.com/event/";
@@ -28,6 +29,20 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !has_slug {
         conn.execute("ALTER TABLE markets_cache ADD COLUMN slug TEXT", [])?;
     }
+
+    // Migration 002: copy_wallets table
+    let has_wallets: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='copy_wallets'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_wallets {
+        conn.execute_batch(MIGRATION_002_SQL)?;
+    }
+
     Ok(())
 }
 
@@ -365,6 +380,7 @@ impl Storage {
 
     /// Wipe ALL persisted state: trading history, statistics, tuning/learning
     /// audit log, and the market discovery cache. Leaves a pristine database.
+    /// Note: copy_wallets are NOT deleted as they are configuration, not history.
     pub fn reset_trading_history(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(
@@ -377,6 +393,162 @@ impl Storage {
              VACUUM;",
         )?;
         Ok(())
+    }
+
+    // ─── Copy Wallets CRUD ─────────────────────────────────────────────
+
+    pub fn list_wallets(&self) -> Result<Vec<WalletRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT address, label, scale_factor, max_daily_exposure_usd, min_trade_size_usd,
+                    allowed_categories, blocked_categories, source, enabled, created_at
+             FROM copy_wallets ORDER BY source, created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let allowed_json: String = row.get(5)?;
+            let blocked_json: String = row.get(6)?;
+            let enabled_int: i64 = row.get(8)?;
+            Ok(WalletRecord {
+                address: row.get(0)?,
+                label: row.get(1)?,
+                scale_factor: row.get(2)?,
+                max_daily_exposure_usd: row.get(3)?,
+                min_trade_size_usd: row.get(4)?,
+                allowed_categories: serde_json::from_str(&allowed_json).unwrap_or_default(),
+                blocked_categories: serde_json::from_str(&blocked_json).unwrap_or_default(),
+                source: row.get(7)?,
+                enabled: enabled_int != 0,
+                created_at: parse_ts(row.get(9)?),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_enabled_wallets(&self) -> Result<Vec<WalletRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT address, label, scale_factor, max_daily_exposure_usd, min_trade_size_usd,
+                    allowed_categories, blocked_categories, source, enabled, created_at
+             FROM copy_wallets WHERE enabled = 1 ORDER BY source, created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let allowed_json: String = row.get(5)?;
+            let blocked_json: String = row.get(6)?;
+            let enabled_int: i64 = row.get(8)?;
+            Ok(WalletRecord {
+                address: row.get(0)?,
+                label: row.get(1)?,
+                scale_factor: row.get(2)?,
+                max_daily_exposure_usd: row.get(3)?,
+                min_trade_size_usd: row.get(4)?,
+                allowed_categories: serde_json::from_str(&allowed_json).unwrap_or_default(),
+                blocked_categories: serde_json::from_str(&blocked_json).unwrap_or_default(),
+                source: row.get(7)?,
+                enabled: enabled_int != 0,
+                created_at: parse_ts(row.get(9)?),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn add_wallet(&self, wallet: &WalletRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO copy_wallets (address, label, scale_factor, max_daily_exposure_usd,
+             min_trade_size_usd, allowed_categories, blocked_categories, source, enabled, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                wallet.address.to_lowercase(),
+                wallet.label,
+                wallet.scale_factor,
+                wallet.max_daily_exposure_usd,
+                wallet.min_trade_size_usd,
+                serde_json::to_string(&wallet.allowed_categories).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string(&wallet.blocked_categories).unwrap_or_else(|_| "[]".into()),
+                wallet.source,
+                wallet.enabled as i64,
+                wallet.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_wallet(&self, address: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM copy_wallets WHERE address = ?1",
+            params![address.to_lowercase()],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn update_wallet(&self, wallet: &WalletRecord) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE copy_wallets SET label=?1, scale_factor=?2, max_daily_exposure_usd=?3,
+             min_trade_size_usd=?4, allowed_categories=?5, blocked_categories=?6,
+             enabled=?7 WHERE address=?8",
+            params![
+                wallet.label,
+                wallet.scale_factor,
+                wallet.max_daily_exposure_usd,
+                wallet.min_trade_size_usd,
+                serde_json::to_string(&wallet.allowed_categories).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string(&wallet.blocked_categories).unwrap_or_else(|_| "[]".into()),
+                wallet.enabled as i64,
+                wallet.address.to_lowercase(),
+            ],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn wallet_exists(&self, address: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM copy_wallets WHERE address = ?1",
+            params![address.to_lowercase()],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn wallet_stats(&self) -> Result<Vec<(String, u32, f64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT copy_wallet, COUNT(*) as trades, COALESCE(SUM(realized_pnl), 0.0) as total_pnl
+             FROM trades
+             WHERE source LIKE 'copy:%'
+             GROUP BY copy_wallet",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_wallets_with_stats(&self) -> Result<Vec<WalletView>> {
+        let wallets = self.list_wallets()?;
+        let stats = self.wallet_stats()?;
+
+        let stats_map: std::collections::HashMap<String, (u32, f64)> = stats
+            .into_iter()
+            .map(|(addr, trades, pnl)| (addr.to_lowercase(), (trades, pnl)))
+            .collect();
+
+        Ok(wallets
+            .into_iter()
+            .map(|w| {
+                let (trades_copied, total_pnl) = stats_map
+                    .get(&w.address.to_lowercase())
+                    .copied()
+                    .unwrap_or((0, 0.0));
+                WalletView {
+                    wallet: w,
+                    trades_copied,
+                    total_pnl,
+                }
+            })
+            .collect())
     }
 }
 

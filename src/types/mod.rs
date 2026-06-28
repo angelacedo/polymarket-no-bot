@@ -311,3 +311,27 @@ impl LatencyTracker {
         sorted[idx.min(sorted.len() - 1)]
     }
 }
+
+/// Wallet configuration for copytrade
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletRecord {
+    pub address: String,
+    pub label: Option<String>,
+    pub scale_factor: f64,
+    pub max_daily_exposure_usd: f64,
+    pub min_trade_size_usd: f64,
+    pub allowed_categories: Vec<String>,
+    pub blocked_categories: Vec<String>,
+    pub source: String, // "manual" | "auto_discovered"
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Wallet view with statistics for dashboard
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletView {
+    #[serde(flatten)]
+    pub wallet: WalletRecord,
+    pub trades_copied: u32,
+    pub total_pnl: f64,
+}

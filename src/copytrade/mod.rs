@@ -2,35 +2,77 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use chrono::Utc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::config::{BotConfig, CopyWalletConfig};
+use crate::config::BotConfig;
 use crate::exchange::ExchangeHub;
+use crate::storage::Storage;
 use crate::strategy::{apply_filters, signal_from_copy};
-use crate::types::{MarketMeta, Side, TradeSignal, WalletTradeEvent};
+use crate::types::{MarketMeta, Side, TradeSignal, WalletRecord, WalletTradeEvent};
 use crate::wallets::fetch_candidate_wallets;
 
 pub struct CopyTradeMonitor {
     config: BotConfig,
     hub: Arc<ExchangeHub>,
+    storage: Storage,
     seen: HashSet<String>,
     markets: HashMap<String, MarketMeta>,
     last_market_refresh: Option<Instant>,
-    candidate_wallets: Vec<String>,
     last_wallet_discovery: Option<Instant>,
+    last_wallet_db_refresh: Option<Instant>,
+    db_wallets: Vec<WalletRecord>,
 }
 
 impl CopyTradeMonitor {
-    pub fn new(config: BotConfig, hub: Arc<ExchangeHub>) -> Self {
+    pub fn new(config: BotConfig, hub: Arc<ExchangeHub>, storage: Storage) -> Self {
         Self {
             config,
             hub,
+            storage,
             seen: HashSet::new(),
             markets: HashMap::new(),
             last_market_refresh: None,
-            candidate_wallets: Vec::new(),
             last_wallet_discovery: None,
+            last_wallet_db_refresh: None,
+            db_wallets: Vec::new(),
+        }
+    }
+
+    /// Migrate wallets from config to database if database is empty
+    fn migrate_config_wallets(&self) {
+        // Check if DB has any wallets
+        if let Ok(existing) = self.storage.list_wallets() {
+            if !existing.is_empty() {
+                info!(count = existing.len(), "copytrade: using existing wallets from database");
+                return;
+            }
+        }
+
+        // Migrate wallets from config
+        let config_wallets = &self.config.copytrade.wallets;
+        if config_wallets.is_empty() {
+            return;
+        }
+
+        info!(count = config_wallets.len(), "copytrade: migrating wallets from config to database");
+        for w in config_wallets {
+            let record = WalletRecord {
+                address: w.address.to_lowercase(),
+                label: None,
+                scale_factor: w.scale_factor,
+                max_daily_exposure_usd: w.max_daily_exposure_usd,
+                min_trade_size_usd: w.min_trade_size_usd,
+                allowed_categories: w.allowed_categories.clone(),
+                blocked_categories: w.blocked_categories.clone(),
+                source: "manual".to_string(),
+                enabled: true,
+                created_at: Utc::now(),
+            };
+            if let Err(e) = self.storage.add_wallet(&record) {
+                warn!(wallet = %w.address, error = %e, "failed to migrate wallet");
+            }
         }
     }
 
@@ -61,6 +103,30 @@ impl CopyTradeMonitor {
         }
     }
 
+    /// Refresh wallets from database
+    fn refresh_wallets_from_db(&mut self) {
+        // Refresh every 30 seconds
+        let ttl = std::time::Duration::from_secs(30);
+        if let Some(last) = self.last_wallet_db_refresh {
+            if last.elapsed() < ttl {
+                return;
+            }
+        }
+
+        match self.storage.list_enabled_wallets() {
+            Ok(wallets) => {
+                let count = wallets.len();
+                self.db_wallets = wallets;
+                self.last_wallet_db_refresh = Some(Instant::now());
+                debug!(count, "copytrade: loaded wallets from database");
+            }
+            Err(e) => {
+                warn!(error = %e, "copytrade: failed to load wallets from database");
+            }
+        }
+    }
+
+    /// Discover and store candidate wallets from leaderboard
     async fn refresh_candidate_wallets(&mut self) {
         if !self.config.copytrade.auto_discover_wallets {
             return;
@@ -77,18 +143,48 @@ impl CopyTradeMonitor {
 
         info!("copytrade: discovering candidate wallets from leaderboard...");
         match fetch_candidate_wallets().await {
-            Ok(wallets) => {
+            Ok(candidates) => {
                 let max = self.config.copytrade.max_candidate_wallets as usize;
-                self.candidate_wallets = wallets.into_iter().take(max).collect();
+                let selected: Vec<_> = candidates.into_iter().take(max).collect();
+                let mut added = 0;
+                let mut updated = 0;
+
+                for address in &selected {
+                    let addr_lower = address.to_lowercase();
+                    match self.storage.wallet_exists(&addr_lower) {
+                        Ok(true) => {
+                            // Wallet exists, could update if needed
+                            updated += 1;
+                        }
+                        Ok(false) => {
+                            // Add new auto-discovered wallet
+                            let record = WalletRecord {
+                                address: addr_lower,
+                                label: None,
+                                scale_factor: 0.1,
+                                max_daily_exposure_usd: 200.0,
+                                min_trade_size_usd: 25.0,
+                                allowed_categories: vec![],
+                                blocked_categories: vec!["sports".to_string()],
+                                source: "auto_discovered".to_string(),
+                                enabled: true,
+                                created_at: Utc::now(),
+                            };
+                            if self.storage.add_wallet(&record).is_ok() {
+                                added += 1;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+
                 self.last_wallet_discovery = Some(Instant::now());
                 info!(
-                    count = self.candidate_wallets.len(),
-                    "copytrade: discovered {} candidate wallets",
-                    self.candidate_wallets.len()
+                    added,
+                    updated,
+                    total = selected.len(),
+                    "copytrade: auto-discovered wallets"
                 );
-                for (i, addr) in self.candidate_wallets.iter().enumerate() {
-                    info!(rank = i + 1, wallet = %addr, "candidate wallet");
-                }
             }
             Err(e) => {
                 warn!(error = %e, "copytrade: failed to discover candidate wallets");
@@ -96,60 +192,42 @@ impl CopyTradeMonitor {
         }
     }
 
-    fn wallet_allowed(&self, wallet_cfg: &CopyWalletConfig, category: &str) -> bool {
-        if wallet_cfg
+    fn wallet_allowed(&self, wallet: &WalletRecord, category: &str) -> bool {
+        if wallet
             .blocked_categories
             .iter()
             .any(|c| c.eq_ignore_ascii_case(category))
         {
             return false;
         }
-        if wallet_cfg.allowed_categories.is_empty() {
+        if wallet.allowed_categories.is_empty() {
             return true;
         }
-        wallet_cfg
+        wallet
             .allowed_categories
             .iter()
             .any(|c| c.eq_ignore_ascii_case(category))
     }
 
-    async fn poll_configured_wallet(
-        &mut self,
-        wallet_cfg: &CopyWalletConfig,
-    ) -> Vec<TradeSignal> {
-        let trades = match self.hub.fetch_wallet_trades(&wallet_cfg.address, 50).await {
+    async fn poll_wallet(&mut self, wallet: &WalletRecord) -> Vec<TradeSignal> {
+        let trades = match self.hub.fetch_wallet_trades(&wallet.address, 50).await {
             Ok(t) => t,
             Err(e) => {
-                warn!(wallet = %wallet_cfg.address, error = %e, "copytrade poll failed");
+                warn!(wallet = %wallet.address, error = %e, "copytrade poll failed");
                 return vec![];
             }
         };
 
         trades
             .into_iter()
-            .filter_map(|t| self.process_trade(t, Some(wallet_cfg)))
-            .collect()
-    }
-
-    async fn poll_candidate_wallet(&mut self, address: &str) -> Vec<TradeSignal> {
-        let trades = match self.hub.fetch_wallet_trades(address, 50).await {
-            Ok(t) => t,
-            Err(e) => {
-                warn!(wallet = %address, error = %e, "copytrade candidate poll failed");
-                return vec![];
-            }
-        };
-
-        trades
-            .into_iter()
-            .filter_map(|t| self.process_trade(t, None))
+            .filter_map(|t| self.process_trade(t, wallet))
             .collect()
     }
 
     fn process_trade(
         &mut self,
         trade: WalletTradeEvent,
-        wallet_cfg: Option<&CopyWalletConfig>,
+        wallet: &WalletRecord,
     ) -> Option<TradeSignal> {
         let dedup_key = format!("{}:{}:{}", trade.tx_hash, trade.asset_id, trade.timestamp);
         if !self.seen.insert(dedup_key) {
@@ -164,9 +242,8 @@ impl CopyTradeMonitor {
             );
         }
 
-        // Apply wallet-specific min_trade_size if configured
-        let min_size = wallet_cfg.map(|w| w.min_trade_size_usd).unwrap_or(25.0);
-        if trade.size_usd < min_size {
+        // Apply wallet-specific min_trade_size
+        if trade.size_usd < wallet.min_trade_size_usd {
             return None;
         }
 
@@ -174,11 +251,9 @@ impl CopyTradeMonitor {
             .values()
             .find(|m| m.no_token_id == trade.asset_id || m.condition_id == trade.condition_id)?;
 
-        // Check category filters if wallet config exists
-        if let Some(cfg) = wallet_cfg {
-            if !self.wallet_allowed(cfg, &market.category) {
-                return None;
-            }
+        // Check category filters
+        if !self.wallet_allowed(wallet, &market.category) {
+            return None;
         }
 
         let no_ask = trade.price;
@@ -186,57 +261,56 @@ impl CopyTradeMonitor {
             return None;
         }
 
-        // Calculate stake: use wallet config scale or default
-        let (scale, max_exposure) = wallet_cfg
-            .map(|w| (w.scale_factor, w.max_daily_exposure_usd))
-            .unwrap_or((0.1, 500.0));
-        let stake = (trade.size_usd * scale).min(max_exposure);
+        // Calculate stake based on wallet configuration
+        let stake = (trade.size_usd * wallet.scale_factor).min(wallet.max_daily_exposure_usd);
 
         debug!(
-            wallet = %trade.wallet,
+            wallet = %wallet.address,
+            label = ?wallet.label,
             market = %market.condition_id,
             stake,
             "copytrade signal"
         );
 
-        Some(signal_from_copy(market.clone(), no_ask, stake, &trade.wallet))
+        Some(signal_from_copy(market.clone(), no_ask, stake, &wallet.address))
     }
 }
 
 pub async fn run_copytrade_loop(
     config: BotConfig,
     hub: Arc<ExchangeHub>,
+    storage: Storage,
     _markets: Arc<parking_lot::RwLock<HashMap<String, MarketMeta>>>,
     signal_tx: mpsc::Sender<TradeSignal>,
 ) {
-    let mut monitor = CopyTradeMonitor::new(config.clone(), hub);
+    let mut monitor = CopyTradeMonitor::new(config.clone(), hub, storage);
     let interval = std::time::Duration::from_millis(config.copytrade.poll_interval_ms);
+
+    // Migrate wallets from config to DB if needed
+    monitor.migrate_config_wallets();
 
     // Initial wallet discovery
     if config.copytrade.auto_discover_wallets {
         monitor.refresh_candidate_wallets().await;
     }
 
+    // Load wallets from DB
+    monitor.refresh_wallets_from_db();
+
     loop {
         // Refresh markets periodically
         monitor.refresh_markets().await;
 
-        // Refresh candidate wallets periodically
+        // Refresh wallets from DB periodically
+        monitor.refresh_wallets_from_db();
+
+        // Discover new candidate wallets periodically
         monitor.refresh_candidate_wallets().await;
 
-        // Poll configured wallets
-        let wallets = config.copytrade.wallets.clone();
-        for wallet_cfg in &wallets {
-            let signals = monitor.poll_configured_wallet(wallet_cfg).await;
-            for sig in signals {
-                let _ = signal_tx.send(sig).await;
-            }
-        }
-
-        // Poll candidate wallets
-        let candidates = monitor.candidate_wallets.clone();
-        for address in &candidates {
-            let signals = monitor.poll_candidate_wallet(address).await;
+        // Poll all enabled wallets from database
+        let wallets = monitor.db_wallets.clone();
+        for wallet in &wallets {
+            let signals = monitor.poll_wallet(wallet).await;
             for sig in signals {
                 let _ = signal_tx.send(sig).await;
             }
