@@ -17,6 +17,8 @@ pub struct CandidateWallet {
     pub total_pnl: f64,
     pub sharpe: Option<f64>,
     pub source: String,
+    pub no_trade_ratio: Option<f64>,  // fraction of trades that are NO (0.0–1.0)
+    pub no_win_rate: Option<f64>,     // win rate specifically on NO trades (0.0–1.0)
 }
 
 /// Filters for short-NO strategy wallet selection
@@ -24,20 +26,25 @@ const MIN_WIN_RATE: f64 = 0.60;
 const MIN_CLOSED_MARKETS: u32 = 50;
 const MAX_AVG_HOLD_DAYS: f64 = 7.0;
 const MIN_DRAWDOWN: f64 = -0.30;
+const MIN_NO_TRADE_RATIO: f64 = 0.40; // at least 40% of trades must be NO
 
 /// Compute composite score for ranking wallets
-/// Higher is better: combines Sharpe, win_rate, PnL, and closed_markets
+/// Higher is better: combines Sharpe, win_rate, PnL, closed_markets, and NO-side quality
 pub fn compute_score(w: &CandidateWallet) -> f64 {
-    // Sharpe (normalizado 0–1 via sigmoid) tiene el mayor peso
     let sharpe_score = w.sharpe.map(|s| 1.0 / (1.0 + (-s).exp())).unwrap_or(0.5);
-    // win_rate directamente (ya en 0–1)
-    let wr_score = w.win_rate;
-    // PnL: log1p(max(0, pnl)) para evitar log(0) y negativos
-    let pnl_score = w.total_pnl.max(0.0).ln_1p() / 10.0_f64.ln_1p(); // normalizado a ln_1p(10) ≈ 1
-    // closed_markets: sqrt para reducir peso de outliers, normalizado a sqrt(500)
+    
+    // Use no_win_rate if available, fall back to global win_rate
+    let effective_wr = w.no_win_rate.unwrap_or(w.win_rate);
+    let wr_score = effective_wr;
+    
+    let pnl_score = w.total_pnl.max(0.0).ln_1p() / 10.0_f64.ln_1p();
     let markets_score = (w.closed_markets as f64).sqrt() / 500_f64.sqrt();
-    // Pesos: Sharpe 35%, win_rate 35%, pnl 15%, markets 15%
-    0.35 * sharpe_score + 0.35 * wr_score + 0.15 * pnl_score.min(1.0) + 0.15 * markets_score.min(1.0)
+    
+    // NO trade ratio bonus: wallets that heavily trade NO get up to 20% boost
+    let no_ratio_bonus = w.no_trade_ratio.unwrap_or(0.5).min(1.0) * 0.20;
+    
+    // Weights: Sharpe 30%, win_rate 30%, pnl 10%, markets 10%, NO ratio bonus 20%
+    0.30 * sharpe_score + 0.30 * wr_score + 0.10 * pnl_score.min(1.0) + 0.10 * markets_score.min(1.0) + no_ratio_bonus
 }
 
 /// Fetch candidate wallets from multiple external sources
@@ -182,6 +189,8 @@ fn count_non_none_fields(w: &CandidateWallet) -> usize {
     if w.max_drawdown.is_some() { count += 1; }
     if w.total_pnl != 0.0 { count += 1; }
     if w.sharpe.is_some() { count += 1; }
+    if w.no_trade_ratio.is_some() { count += 1; }
+    if w.no_win_rate.is_some() { count += 1; }
     count
 }
 
@@ -223,8 +232,20 @@ async fn fetch_polymarket_official_wallets(client: &Client) -> Result<Vec<Candid
                 continue;
             }
 
+            let addr = address.unwrap();
+            
+            // Try to enrich with NO-side data (best-effort, with short timeout)
+            let (no_trade_ratio, no_win_rate) = tokio::time::timeout(
+                Duration::from_secs(5),
+                fetch_no_side_ratio(client, &addr)
+            )
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or((0.5, None)); // Default to 50% if fetch fails
+
             all_wallets.push(CandidateWallet {
-                address: address.unwrap(),
+                address: addr,
                 win_rate: entry.win_rate.unwrap_or(0.0),
                 closed_markets: entry.markets_traded.unwrap_or(0),
                 avg_hold_days: None,
@@ -232,6 +253,8 @@ async fn fetch_polymarket_official_wallets(client: &Client) -> Result<Vec<Candid
                 total_pnl: entry.profit.unwrap_or(0.0),
                 sharpe: entry.sharpe,
                 source: "polymarket_official".to_string(),
+                no_trade_ratio: Some(no_trade_ratio),
+                no_win_rate,
             });
         }
 
@@ -254,6 +277,44 @@ struct PolymarketOfficialEntry {
     win_rate: Option<f64>,
     sharpe: Option<f64>,
     drawdown: Option<f64>,
+}
+
+/// Fetch NO-side trade ratio and win rate from Polymarket Data API
+/// Returns (no_trade_ratio, no_win_rate) or None on failure
+async fn fetch_no_side_ratio(client: &Client, address: &str) -> Option<(f64, Option<f64>)> {
+    let url = format!(
+        "https://data-api.polymarket.com/activity?user={}&limit=200",
+        address
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() { return None; }
+    
+    let trades: Vec<serde_json::Value> = resp.json().await.ok()?;
+    if trades.is_empty() { return None; }
+    
+    let total = trades.len() as f64;
+    let no_trades: Vec<_> = trades.iter()
+        .filter(|t| t.get("outcome").and_then(|v| v.as_str()) == Some("No"))
+        .collect();
+    
+    let no_count = no_trades.len() as f64;
+    let no_ratio = no_count / total;
+    
+    // Calculate win rate on NO trades (resolved markets only)
+    let resolved_no: Vec<_> = no_trades.iter()
+        .filter(|t| t.get("resolved").and_then(|v| v.as_bool()) == Some(true))
+        .collect();
+    
+    let no_wr = if resolved_no.is_empty() {
+        None
+    } else {
+        let wins = resolved_no.iter()
+            .filter(|t| t.get("won").and_then(|v| v.as_bool()) == Some(true))
+            .count() as f64;
+        Some(wins / resolved_no.len() as f64)
+    };
+    
+    Some((no_ratio, no_wr))
 }
 
 /// Fetch wallets from Polyburg leaderboard
@@ -302,6 +363,8 @@ fn parse_polyburg_html(html: &str) -> Result<Vec<CandidateWallet>> {
             total_pnl: parse_cell_f64(&cells, 6).unwrap_or(0.0),
             sharpe: parse_cell_f64(&cells, 7),
             source: "polyburg".to_string(),
+            no_trade_ratio: None,
+            no_win_rate: None,
         });
     }
 
@@ -439,6 +502,8 @@ fn parse_generic_json(json: &serde_json::Value, source: &str) -> Result<Vec<Cand
                 .unwrap_or(0.0),
             sharpe: entry.get("sharpe").and_then(|v| v.as_f64()),
             source: source.to_string(),
+            no_trade_ratio: None,
+            no_win_rate: None,
         });
     }
 
@@ -473,6 +538,8 @@ fn parse_generic_html(html: &str, source: &str) -> Result<Vec<CandidateWallet>> 
             total_pnl: parse_cell_f64(&cells, 6).unwrap_or(0.0),
             sharpe: parse_cell_f64(&cells, 7),
             source: source.to_string(),
+            no_trade_ratio: None,
+            no_win_rate: None,
         });
     }
 
@@ -600,6 +667,18 @@ fn passes_filters(w: &CandidateWallet) -> bool {
         }
     }
 
+    // Must trade NO side at least 40% of the time (if data available)
+    if let Some(no_ratio) = w.no_trade_ratio {
+        if no_ratio < MIN_NO_TRADE_RATIO {
+            debug!(
+                wallet = %w.address,
+                no_trade_ratio = no_ratio,
+                "rejecting: insufficient NO trade ratio"
+            );
+            return false;
+        }
+    }
+
     true
 }
 
@@ -715,6 +794,8 @@ mod tests {
             total_pnl: 1000.0,
             sharpe: Some(1.0),
             source: "test".to_string(),
+            no_trade_ratio: None,
+            no_win_rate: None,
         }
     }
 
@@ -760,6 +841,22 @@ mod tests {
     }
 
     #[test]
+    fn test_rejects_low_no_trade_ratio() {
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        w.no_trade_ratio = Some(0.10); // only 10% NO trades
+        w.no_win_rate = None;
+        assert!(!passes_filters(&w));
+    }
+
+    #[test]
+    fn test_accepts_high_no_trade_ratio() {
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        w.no_trade_ratio = Some(0.60);
+        w.no_win_rate = Some(0.70);
+        assert!(passes_filters(&w));
+    }
+
+    #[test]
     fn test_extract_address_from_url() {
         assert_eq!(
             extract_address_from_url("https://polymarket.com/profile/0x1234567890123456789012345678901234567890"),
@@ -798,6 +895,8 @@ mod tests {
             total_pnl: 1000.0,
             sharpe: Some(1.0),
             source: "source1".to_string(),
+            no_trade_ratio: None,
+            no_win_rate: None,
         };
 
         let w2 = CandidateWallet {
@@ -809,6 +908,8 @@ mod tests {
             total_pnl: 2000.0,
             sharpe: Some(1.5),
             source: "source2".to_string(),
+            no_trade_ratio: Some(0.65),
+            no_win_rate: Some(0.75),
         };
 
         let wallets = vec![w1, w2];
