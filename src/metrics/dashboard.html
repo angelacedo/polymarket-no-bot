@@ -230,6 +230,8 @@
     .tag-lost { background: var(--rose-dim); color: var(--rose); }
     .tag-open { background: rgba(96,165,250,0.12); color: var(--paper); }
     .tag-flat { background: var(--surface-3); color: var(--text-muted); }
+    .tag-no  { background: rgba(244,114,138,0.15); color: #f4728a; }
+    .tag-yes { background: rgba(251,191,36,0.15);  color: #fbbf24; }
 
     .trade-pnl { text-align: right; flex-shrink: 0; }
     .trade-pnl .amount {
@@ -281,11 +283,59 @@
       text-align: center; padding: 48px 24px; color: var(--text-faint); font-size: 13px;
     }
 
+    /* Wallets */
+    .wallet-list { display: flex; flex-direction: column; gap: 8px; }
+    .wallet-item {
+      display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center;
+      padding: 14px 16px; background: var(--surface-2); border-radius: 10px;
+      border: 1px solid var(--border); transition: border-color 150ms;
+    }
+    .wallet-item:hover { border-color: var(--border-strong); }
+    .wallet-main { min-width: 0; }
+    .wallet-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .wallet-label { font-size: 13px; font-weight: 500; }
+    .wallet-address {
+      font-family: var(--mono); font-size: 11px; color: var(--text-faint);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px;
+    }
+    .wallet-meta { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--text-muted); }
+    .wallet-meta span { display: flex; align-items: center; gap: 4px; }
+    .wallet-meta code { font-family: var(--mono); color: var(--text); }
+    .wallet-stats { text-align: right; flex-shrink: 0; }
+    .wallet-stats .trades { font-family: var(--mono); font-size: 14px; font-weight: 600; }
+    .wallet-stats .pnl { font-family: var(--mono); font-size: 12px; margin-top: 2px; }
+    .wallet-actions { display: flex; gap: 6px; margin-top: 8px; }
+    .wallet-actions button {
+      padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+      background: transparent; color: var(--text-muted); cursor: pointer; font-size: 10px;
+      transition: 150ms;
+    }
+    .wallet-actions button:hover { background: var(--surface-3); color: var(--text); }
+    .wallet-actions button.danger:hover { background: var(--rose-dim); color: var(--rose); border-color: rgba(244,114,138,0.3); }
+    .tag-source { padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+    .tag-source.manual { background: rgba(96,165,250,0.15); color: var(--paper); }
+    .tag-source.auto { background: rgba(34,211,238,0.15); color: var(--cyan); }
+    .tag-source.disabled { background: var(--surface-3); color: var(--text-faint); }
+
     .demo-banner {
       display: none; padding: 10px 28px; background: rgba(251,191,36,0.08);
       border-bottom: 1px solid rgba(251,191,36,0.2); font-size: 12px; color: var(--amber);
     }
     .demo-banner.show { display: block; }
+
+    .error-banner {
+      display: none; padding: 10px 28px; background: rgba(244,114,138,0.10);
+      border-bottom: 1px solid rgba(244,114,138,0.25); font-size: 12px; color: var(--rose);
+      align-items: center; gap: 12px;
+    }
+    .error-banner.show { display: flex; }
+    .error-banner button {
+      font-family: var(--font); font-size: 11px; font-weight: 600;
+      padding: 4px 14px; border-radius: 6px; border: 1px solid rgba(244,114,138,0.3);
+      background: rgba(244,114,138,0.12); color: var(--rose); cursor: pointer;
+      transition: 150ms;
+    }
+    .error-banner button:hover { background: rgba(244,114,138,0.22); }
 
     .section { display: none; }
     .section.active { display: block; }
@@ -305,6 +355,10 @@
 </head>
 <body>
   <div class="demo-banner" id="demoBanner">Demo mode — API unreachable. Showing simulated intelligence data.</div>
+  <div class="error-banner" id="errorBanner">
+    <span id="errorText">Backend no disponible</span>
+    <button id="retryBtn" style="display:none">Reintentar</button>
+  </div>
 
   <div class="shell">
     <nav class="rail" aria-label="Main">
@@ -320,6 +374,9 @@
       <button class="rail-btn" data-section="risk" title="Risk">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
       </button>
+      <button class="rail-btn" data-section="wallets" title="Wallets">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      </button>
     </nav>
 
     <div class="main">
@@ -334,6 +391,10 @@
           <div class="status-pill">
             <span class="pulse" id="pulse"></span>
             <span id="connText">Connecting…</span>
+          </div>
+          <div class="status-pill" id="invariantIndicator" style="gap:6px">
+            <span id="invariantDot" style="width:8px;height:8px;border-radius:50%;background:var(--emerald);box-shadow:0 0 6px var(--emerald)"></span>
+            <span id="invariantText" style="font-size:11px;font-weight:500">NO-only</span>
           </div>
           <span class="mode-badge paper" id="modeBadge">PAPER</span>
         </div>
@@ -407,6 +468,62 @@
             <div class="card-body tune-list" id="tuningLog"></div>
           </div>
         </div>
+
+        <!-- WALLETS -->
+        <div class="section" id="sec-wallets">
+          <p class="panel-label">Copytrade wallets</p>
+          <div class="stat-row" id="walletStats"></div>
+
+          <div class="card">
+            <div class="card-head">
+              <h2>Managed wallets</h2>
+              <div class="tabs" id="walletTabs">
+                <button data-filter="all" class="active">All</button>
+                <button data-filter="manual">Manual</button>
+                <button data-filter="auto_discovered">Auto-discovered</button>
+              </div>
+            </div>
+            <div class="card-body">
+              <button id="addWalletBtn" style="margin-bottom:16px;padding:8px 16px;border-radius:8px;border:1px solid var(--border-strong);background:var(--surface-2);color:var(--text);cursor:pointer;font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Add wallet
+              </button>
+              <div id="addWalletForm" style="display:none;margin-bottom:20px;padding:16px;background:var(--surface-2);border-radius:10px;border:1px solid var(--border);">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                  <div>
+                    <label style="display:block;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Address *</label>
+                    <input id="newWalletAddress" type="text" placeholder="0x..." style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:var(--mono);font-size:12px;">
+                  </div>
+                  <div>
+                    <label style="display:block;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Label</label>
+                    <input id="newWalletLabel" type="text" placeholder="Optional name" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:12px;">
+                  </div>
+                  <div>
+                    <label style="display:block;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Scale factor</label>
+                    <input id="newWalletScale" type="number" value="0.1" step="0.01" min="0.01" max="1" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:var(--mono);font-size:12px;">
+                  </div>
+                  <div>
+                    <label style="display:block;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Max daily exposure ($)</label>
+                    <input id="newWalletExposure" type="number" value="500" step="50" min="0" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:var(--mono);font-size:12px;">
+                  </div>
+                  <div>
+                    <label style="display:block;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Min trade size ($)</label>
+                    <input id="newWalletMinTrade" type="number" value="25" step="5" min="0" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:var(--mono);font-size:12px;">
+                  </div>
+                  <div>
+                    <label style="display:block;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Allowed categories</label>
+                    <input id="newWalletAllowed" type="text" placeholder="crypto,macro,politics" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:12px;">
+                  </div>
+                </div>
+                <div style="margin-top:12px;display:flex;gap:8px;">
+                  <button id="saveWalletBtn" style="padding:8px 16px;border-radius:6px;border:none;background:var(--emerald);color:var(--bg);cursor:pointer;font-size:12px;font-weight:600;">Save</button>
+                  <button id="cancelWalletBtn" style="padding:8px 16px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;font-size:12px;">Cancel</button>
+                </div>
+              </div>
+              <div class="wallet-list" id="walletList"></div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -420,6 +537,9 @@
   let equityHistory = [];
   let tradeFilter = 'closed';
   let overviewFilter = 'closed';
+  let failCount = 0;
+  let lastSuccessTime = null;
+  let pollTimer = null;
 
   const $ = id => document.getElementById(id);
   const fmt = {
@@ -449,6 +569,7 @@
       marketUrl: t.market_url || null,
       category: t.category || 'other',
       underlying: t.underlying || '—',
+      side: (t.side || 'no').toString().toLowerCase(),
       entry: t.entry_price,
       exit: t.exit_price,
       size: t.size_shares,
@@ -489,6 +610,7 @@
         market_url: 'https://polymarket.com/event/demo-market-' + i,
         category: ['crypto','macro','politics'][i%3],
         underlying: ['BTC','ETH','SOL'][i%3],
+        side: i % 10 === 7 ? 'yes' : 'no',
         entry_price: entry,
         exit_price: exit,
         size_shares: size,
@@ -509,6 +631,7 @@
       latency_p50_fill_ms: 68,
       recent_trades: trades.map(t => ({
         market_id: t.market, category: t.category, underlying: t.underlying,
+        side: t.side,
         entry_price: t.entry, exit_price: t.exit, size_shares: t.size,
         realized_pnl: t.pnl, mode: t.mode, source: t.source.toLowerCase(), ts: t.ts,
       })),
@@ -531,6 +654,47 @@
     }
   }
 
+  async function fetchStatusLive() {
+    const r = await fetch(`${API}/api/status`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) throw new Error('bad status');
+    const j = await r.json();
+    j._trades = (j.recent_trades || []).map(normalizeTrade);
+    return j;
+  }
+
+  function updateErrorBanner(ok) {
+    const banner = $('errorBanner');
+    const retryBtn = $('retryBtn');
+    const errorText = $('errorText');
+    if (ok) {
+      failCount = 0;
+      lastSuccessTime = new Date();
+      banner.classList.remove('show');
+      retryBtn.style.display = 'none';
+      if (pollTimer === null) startPolling();
+    } else {
+      failCount++;
+      const timeStr = lastSuccessTime
+        ? lastSuccessTime.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : '--:--:--';
+      errorText.textContent = `\u26a0\ufe0f Backend no disponible \u2014 \u00faltimo dato: ${timeStr} (${failCount} intentos)`;
+      banner.classList.add('show');
+      if (failCount > 3) {
+        stopPolling();
+        retryBtn.style.display = 'inline-block';
+      }
+    }
+  }
+
+  function startPolling() {
+    if (pollTimer !== null) clearInterval(pollTimer);
+    pollTimer = setInterval(tick, 3000);
+  }
+
+  function stopPolling() {
+    if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
   function pushEquity(equity) {
     equityHistory.push({ t: Date.now(), v: equity });
     if (equityHistory.length > 80) equityHistory.shift();
@@ -539,6 +703,10 @@
   function renderMetrics() {
     const p = data.paper_pnl || {};
     const stats = tradeStats(data._trades || []);
+    const recent = (data._trades || []).slice(0, 20);
+    const noCount = recent.filter(t => t.side === 'no').length;
+    const yesCount = recent.filter(t => t.side === 'yes').length;
+    const sideStats = `\u2193 ${noCount} NO \u00b7 ${yesCount} YES`;
     const items = [
       { label: 'Portfolio', val: p.equity, sub: `${data.open_positions || 0} open positions`, cls: 'neu' },
       { label: 'Realized P&L', val: p.realized_pnl, sub: `${stats.closed} closed trades`, cls: fmt.pnlClass(p.realized_pnl || 0) },
@@ -551,6 +719,7 @@
         <div class="val ${it.cls}">${it.text ?? fmt.signed(it.val || 0)}</div>
         <div class="sub">${it.sub}</div>
       </div>`).join('');
+    $('equitySub').textContent = `${(data.mode || 'paper').toUpperCase()} · DD ${((p.drawdown_fraction||0)*100).toFixed(2)}% · ${sideStats}`;
   }
 
   function renderChart() {
@@ -592,7 +761,6 @@
       chart.data.datasets[1].data = values.map(() => 10000);
       chart.update('none');
     }
-    $('equitySub').textContent = `${(data.mode || 'paper').toUpperCase()} · DD ${((p.drawdown_fraction||0)*100).toFixed(2)}%`;
   }
 
   function exposureBar(name, current, limit) {
@@ -618,6 +786,8 @@
   function tradeRow(t) {
     const rowCls = t.result === 'Won' ? 'win' : t.result === 'Lost' ? 'loss' : t.result === 'Open' ? 'open' : 'flat';
     const tagCls = t.result === 'Won' ? 'tag-won' : t.result === 'Lost' ? 'tag-lost' : t.result === 'Open' ? 'tag-open' : 'tag-flat';
+    const sideCls = t.side === 'yes' ? 'tag-yes' : 'tag-no';
+    const sideLabel = t.side === 'yes' ? 'YES' : 'NO';
     const label = esc(fmt.trunc(t.market, 52));
     const title = esc(t.market);
     const marketEl = t.marketUrl
@@ -628,6 +798,7 @@
       <div class="trade-main">
         ${marketEl}
         <div class="trade-meta">
+          <span class="tag ${sideCls}">${sideLabel}</span>
           <span class="tag ${tagCls}">${t.result}</span>
           <span>${esc(t.category)}</span>
           ${idChip}
@@ -686,6 +857,130 @@
       : '<div class="empty">No tuning events yet</div>';
   }
 
+  // ─── Wallets ───────────────────────────────────────────────────────
+
+  let walletFilter = 'all';
+
+  function walletRow(w) {
+    const sourceTag = w.source === 'manual'
+      ? '<span class="tag-source manual">Manual</span>'
+      : '<span class="tag-source auto">Auto</span>';
+    const enabledTag = w.enabled ? '' : '<span class="tag-source disabled">Disabled</span>';
+    const label = w.label || esc(fmt.trunc(w.address, 16));
+    const shortAddr = w.address.slice(0, 8) + '...' + w.address.slice(-6);
+    const pnlCls = fmt.pnlClass(w.total_pnl || 0);
+
+    return `<div class="wallet-item" data-address="${esc(w.address)}">
+      <div class="wallet-main">
+        <div class="wallet-header">
+          <span class="wallet-label">${label}</span>
+          ${sourceTag}
+          ${enabledTag}
+        </div>
+        <div class="wallet-address" title="${esc(w.address)}">${shortAddr}</div>
+        <div class="wallet-meta">
+          <span>Scale <code>${(w.scale_factor * 100).toFixed(0)}%</code></span>
+          <span>Max exp <code>$${w.max_daily_exposure_usd.toFixed(0)}</code></span>
+          <span>Min trade <code>$${w.min_trade_size_usd.toFixed(0)}</code></span>
+          ${w.allowed_categories?.length ? `<span>Categories <code>${w.allowed_categories.join(', ')}</code></span>` : ''}
+        </div>
+        <div class="wallet-actions">
+          <button onclick="toggleWallet('${esc(w.address)}', ${!w.enabled})">${w.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="danger" onclick="removeWallet('${esc(w.address)}')">Remove</button>
+        </div>
+      </div>
+      <div class="wallet-stats">
+        <div class="trades">${w.trades_copied || 0} trades</div>
+        <div class="pnl ${pnlCls}">${fmt.signed(w.total_pnl || 0)}</div>
+      </div>
+    </div>`;
+  }
+
+  function renderWallets() {
+    const wallets = data.wallets || [];
+    const totalTrades = wallets.reduce((s, w) => s + (w.trades_copied || 0), 0);
+    const totalPnl = wallets.reduce((s, w) => s + (w.total_pnl || 0), 0);
+    const manualCount = wallets.filter(w => w.source === 'manual').length;
+    const autoCount = wallets.filter(w => w.source === 'auto_discovered').length;
+
+    $('walletStats').innerHTML = `
+      <div><label>Total wallets</label><span>${wallets.length}</span></div>
+      <div><label>Manual</label><span>${manualCount}</span></div>
+      <div><label>Auto-discovered</label><span>${autoCount}</span></div>
+      <div><label>Trades copied</label><span>${totalTrades}</span></div>
+      <div><label>Total PnL</label><span class="${fmt.pnlClass(totalPnl)}">${fmt.signed(totalPnl)}</span></div>`;
+
+    const filtered = walletFilter === 'all' ? wallets : wallets.filter(w => w.source === walletFilter);
+    $('walletList').innerHTML = filtered.length
+      ? filtered.map(walletRow).join('')
+      : '<div class="empty">No wallets in this view</div>';
+  }
+
+  async function addWallet() {
+    const address = $('newWalletAddress').value.trim();
+    if (!address || !address.startsWith('0x') || address.length !== 42) {
+      alert('Invalid address format. Must be 0x... (42 chars)');
+      return;
+    }
+
+    const body = {
+      address,
+      label: $('newWalletLabel').value.trim() || null,
+      scale_factor: parseFloat($('newWalletScale').value) || 0.1,
+      max_daily_exposure_usd: parseFloat($('newWalletExposure').value) || 500,
+      min_trade_size_usd: parseFloat($('newWalletMinTrade').value) || 25,
+      allowed_categories: $('newWalletAllowed').value.split(',').map(s => s.trim()).filter(Boolean),
+    };
+
+    try {
+      const r = await fetch(`${API}/api/wallets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const err = await r.text();
+        throw new Error(err);
+      }
+      $('addWalletForm').style.display = 'none';
+      $('newWalletAddress').value = '';
+      $('newWalletLabel').value = '';
+      tick();
+    } catch (e) {
+      alert('Failed to add wallet: ' + e.message);
+    }
+  }
+
+  async function removeWallet(address) {
+    if (!confirm(`Remove wallet ${address.slice(0,8)}...?`)) return;
+    try {
+      const r = await fetch(`${API}/api/wallets/${address}`, { method: 'DELETE' });
+      if (!r.ok) throw new Error(await r.text());
+      tick();
+    } catch (e) {
+      alert('Failed to remove wallet: ' + e.message);
+    }
+  }
+
+  async function toggleWallet(address, enabled) {
+    try {
+      const r = await fetch(`${API}/api/wallets/${address}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      tick();
+    } catch (e) {
+      alert('Failed to update wallet: ' + e.message);
+    }
+  }
+
+  // Make functions global for onclick handlers
+  window.addWallet = addWallet;
+  window.removeWallet = removeWallet;
+  window.toggleWallet = toggleWallet;
+
   function renderHeader() {
     const mode = (data.mode || 'paper').toLowerCase();
     const badge = $('modeBadge');
@@ -695,6 +990,21 @@
     pulse.className = 'pulse' + (demo ? ' demo' : '');
     $('connText').textContent = demo ? 'Demo data' : 'Live feed';
     $('demoBanner').classList.toggle('show', demo);
+    const lastTrade = (data._trades || [])[0];
+    const lastSide = lastTrade?.side || 'no';
+    const dot = $('invariantDot');
+    const txt = $('invariantText');
+    if (lastSide === 'no') {
+      dot.style.background = 'var(--emerald)';
+      dot.style.boxShadow = '0 0 6px var(--emerald)';
+      txt.style.color = 'var(--emerald)';
+      txt.textContent = 'NO-only';
+    } else {
+      dot.style.background = 'var(--rose)';
+      dot.style.boxShadow = '0 0 6px var(--rose)';
+      txt.style.color = 'var(--rose)';
+      txt.textContent = 'YES detected';
+    }
   }
 
   function renderAll() {
@@ -705,10 +1015,17 @@
     renderTradeList('overviewTrades', overviewFilter);
     renderTradeSection();
     renderRisk();
+    renderWallets();
   }
 
   async function tick() {
-    data = await fetchStatus();
+    try {
+      data = await fetchStatusLive();
+      updateErrorBanner(true);
+    } catch {
+      updateErrorBanner(false);
+      data = demoData();
+    }
     renderAll();
   }
 
@@ -740,8 +1057,32 @@
     };
   });
 
+  document.querySelectorAll('#walletTabs button').forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll('#walletTabs button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      walletFilter = btn.dataset.filter;
+      renderWallets();
+    };
+  });
+
+  $('addWalletBtn').onclick = () => {
+    const form = $('addWalletForm');
+    form.style.display = form.style.display === 'none' ? 'block' : 'none';
+  };
+
+  $('saveWalletBtn').onclick = addWallet;
+  $('cancelWalletBtn').onclick = () => {
+    $('addWalletForm').style.display = 'none';
+  };
+
+  $('retryBtn').onclick = () => {
+    failCount = 0;
+    tick();
+  };
+
   tick();
-  setInterval(tick, 3000);
+  startPolling();
 })();
 </script>
 </body>
