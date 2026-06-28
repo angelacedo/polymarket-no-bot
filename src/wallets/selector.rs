@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::DateTime;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
@@ -737,7 +738,7 @@ pub fn evaluate_wallet(w: &CandidateWallet) -> WalletEvaluation {
     }
 }
 
-/// Fetch metrics for a specific wallet address from external sources
+/// Fetch metrics for a specific wallet address directly from Polymarket Data API
 pub async fn fetch_wallet_metrics(address: &str) -> Result<CandidateWallet> {
     let client = Client::builder()
         .user_agent("polymarket-no-bot/0.1")
@@ -745,34 +746,110 @@ pub async fn fetch_wallet_metrics(address: &str) -> Result<CandidateWallet> {
         .build()
         .context("building HTTP client")?;
     
-    let addr_lower = address.to_lowercase();
+    let url = format!(
+        "https://data-api.polymarket.com/activity?user={}&limit=500",
+        address
+    );
     
-    // Try each source until we find the wallet
-    if let Ok(wallets) = fetch_polymarket_official_wallets(&client).await {
-        if let Some(w) = wallets.into_iter().find(|w| w.address.to_lowercase() == addr_lower) {
-            return Ok(w);
-        }
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("fetching wallet activity from Data API")?;
+    
+    if !resp.status().is_success() {
+        anyhow::bail!("Data API returned status {}", resp.status());
     }
     
-    if let Ok(wallets) = fetch_polyburg_wallets(&client).await {
-        if let Some(w) = wallets.into_iter().find(|w| w.address.to_lowercase() == addr_lower) {
-            return Ok(w);
-        }
+    let trades: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .context("parsing Data API response")?;
+    
+    if trades.is_empty() {
+        anyhow::bail!("no activity found for wallet {}", address);
     }
     
-    if let Ok(wallets) = fetch_polyscalping_wallets(&client).await {
-        if let Some(w) = wallets.into_iter().find(|w| w.address.to_lowercase() == addr_lower) {
-            return Ok(w);
-        }
-    }
+    // Calculate metrics from activity data
+    let total_trades = trades.len() as f64;
     
-    if let Ok(wallets) = fetch_polyalerthub_wallets(&client).await {
-        if let Some(w) = wallets.into_iter().find(|w| w.address.to_lowercase() == addr_lower) {
-            return Ok(w);
-        }
-    }
+    // NO trade ratio
+    let no_trades: Vec<_> = trades.iter()
+        .filter(|t| t.get("outcome").and_then(|v| v.as_str()) == Some("No"))
+        .collect();
+    let no_trade_ratio = no_trades.len() as f64 / total_trades;
     
-    anyhow::bail!("wallet {} not found in any external source", address)
+    // Resolved trades for win rate calculation
+    let resolved_trades: Vec<_> = trades.iter()
+        .filter(|t| t.get("resolved").and_then(|v| v.as_bool()) == Some(true))
+        .collect();
+    
+    let win_rate = if resolved_trades.is_empty() {
+        0.0
+    } else {
+        let wins = resolved_trades.iter()
+            .filter(|t| t.get("won").and_then(|v| v.as_bool()) == Some(true))
+            .count() as f64;
+        wins / resolved_trades.len() as f64
+    };
+    
+    // NO win rate
+    let resolved_no_trades: Vec<_> = no_trades.iter()
+        .filter(|t| t.get("resolved").and_then(|v| v.as_bool()) == Some(true))
+        .collect();
+    
+    let no_win_rate = if resolved_no_trades.is_empty() {
+        None
+    } else {
+        let no_wins = resolved_no_trades.iter()
+            .filter(|t| t.get("won").and_then(|v| v.as_bool()) == Some(true))
+            .count() as f64;
+        Some(no_wins / resolved_no_trades.len() as f64)
+    };
+    
+    // Closed markets (unique condition_ids with resolved=true)
+    let closed_markets = resolved_trades.iter()
+        .filter_map(|t| t.get("condition_id").and_then(|v| v.as_str()))
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u32;
+    
+    // Average hold time (in days)
+    let avg_hold_days = {
+        let hold_times: Vec<f64> = resolved_trades.iter()
+            .filter_map(|t| {
+                let created = t.get("created_at").and_then(|v| v.as_str())?;
+                let resolved = t.get("resolved_at").and_then(|v| v.as_str())?;
+                let created_dt = DateTime::parse_from_rfc3339(created).ok()?;
+                let resolved_dt = DateTime::parse_from_rfc3339(resolved).ok()?;
+                let days = (resolved_dt - created_dt).num_seconds() as f64 / 86400.0;
+                Some(days)
+            })
+            .collect();
+        
+        if hold_times.is_empty() {
+            None
+        } else {
+            Some(hold_times.iter().sum::<f64>() / hold_times.len() as f64)
+        }
+    };
+    
+    // Total PnL (sum of profit across resolved trades)
+    let total_pnl = resolved_trades.iter()
+        .filter_map(|t| t.get("profit").and_then(|v| v.as_f64()))
+        .sum::<f64>();
+    
+    Ok(CandidateWallet {
+        address: address.to_string(),
+        win_rate,
+        closed_markets,
+        avg_hold_days,
+        max_drawdown: None,
+        total_pnl,
+        sharpe: None,
+        source: "data_api_direct".to_string(),
+        no_trade_ratio: Some(no_trade_ratio),
+        no_win_rate,
+    })
 }
 
 #[cfg(test)]
