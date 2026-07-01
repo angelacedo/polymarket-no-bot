@@ -336,45 +336,87 @@ impl CopyTradeMonitor {
     ) -> Option<TradeSignal> {
         let dedup_key = format!("{}:{}:{}", trade.tx_hash, trade.asset_id, trade.timestamp);
         if !self.seen.insert(dedup_key) {
+            info!(
+                wallet = %wallet.address,
+                tx_hash = %trade.tx_hash,
+                "evaluating new trades for wallet={} passed_metrics=false (duplicate)",
+                wallet.address
+            );
             return None;
         }
 
         if trade.side != Side::No {
-            debug!(
-                "copytrade: skipping non-NO trade (side={:?}, wallet={}, market={})",
-                trade.side, trade.wallet, trade.condition_id
+            info!(
+                wallet = %wallet.address,
+                side = ?trade.side,
+                "evaluating new trades for wallet={} passed_metrics=false (not NO side)",
+                wallet.address
             );
             return None;
         }
 
         // Apply wallet-specific min_trade_size
         if trade.size_usd < wallet.min_trade_size_usd {
+            info!(
+                wallet = %wallet.address,
+                size_usd = trade.size_usd,
+                min_required = wallet.min_trade_size_usd,
+                "evaluating new trades for wallet={} passed_metrics=false (below min size)",
+                wallet.address
+            );
             return None;
         }
 
         let market = self.markets
             .values()
-            .find(|m| m.no_token_id == trade.asset_id || m.condition_id == trade.condition_id)?;
+            .find(|m| m.no_token_id == trade.asset_id || m.condition_id == trade.condition_id);
+
+        if market.is_none() {
+            info!(
+                wallet = %wallet.address,
+                asset_id = %trade.asset_id,
+                "evaluating new trades for wallet={} passed_metrics=false (market not found)",
+                wallet.address
+            );
+            return None;
+        }
+        let market = market.unwrap();
 
         // Check category filters
         if !self.wallet_allowed(wallet, &market.category) {
+            info!(
+                wallet = %wallet.address,
+                category = %market.category,
+                "evaluating new trades for wallet={} passed_metrics=false (category blocked)",
+                wallet.address
+            );
             return None;
         }
 
         let no_ask = trade.price;
         if apply_filters(&self.config, market, no_ask, market.liquidity_usd).is_err() {
+            info!(
+                wallet = %wallet.address,
+                price = no_ask,
+                liquidity = market.liquidity_usd,
+                "evaluating new trades for wallet={} passed_metrics=false (market filters failed)",
+                wallet.address
+            );
             return None;
         }
 
         // Calculate stake based on wallet configuration
         let stake = (trade.size_usd * wallet.scale_factor).min(wallet.max_daily_exposure_usd);
 
-        debug!(
+        info!(
             wallet = %wallet.address,
             label = ?wallet.label,
             market = %market.condition_id,
-            stake,
-            "copytrade signal"
+            stake = stake,
+            size_usd = trade.size_usd,
+            price = no_ask,
+            "evaluating new trades for wallet={} passed_metrics=true",
+            wallet.address
         );
 
         Some(signal_from_copy(market.clone(), no_ask, stake, &wallet.address))

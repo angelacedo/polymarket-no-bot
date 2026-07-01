@@ -112,7 +112,16 @@ mod tests {
     fn rejects_low_no_price() {
         let cfg = test_config();
         assert_eq!(
-            apply_filters(&cfg, &sample_market(), 0.50, 1000.0),
+            apply_filters(&cfg, &sample_market(), 0.35, 1000.0),
+            Err(FilterReject::PriceOutOfRange)
+        );
+    }
+
+    #[test]
+    fn rejects_high_no_price() {
+        let cfg = test_config();
+        assert_eq!(
+            apply_filters(&cfg, &sample_market(), 0.95, 1000.0),
             Err(FilterReject::PriceOutOfRange)
         );
     }

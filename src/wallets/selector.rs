@@ -247,6 +247,14 @@ pub fn compute_score(w: &CandidateWallet) -> f64 {
 
 /// Fetch candidate wallets from multiple external sources
 pub async fn fetch_candidate_wallets() -> Result<Vec<String>> {
+    // Auto-discovery temporarily disabled: external leaderboard endpoints return 404.
+    // Bot will use only static wallets from config.
+    info!("auto-discovery disabled: external leaderboard endpoints unavailable, using config wallets only");
+    return Ok(vec![]);
+
+    // NOTE: The discovery logic below is preserved for future re-enablement.
+    // Uncomment when leaderboard APIs are restored.
+    /*
     let client = Client::builder()
         .user_agent("polymarket-no-bot/0.1")
         .timeout(Duration::from_secs(30))
@@ -354,6 +362,7 @@ pub async fn fetch_candidate_wallets() -> Result<Vec<String>> {
 
     // Return addresses in lowercase
     Ok(sorted.into_iter().map(|w| w.address.to_lowercase()).collect())
+    */
 }
 
 /// Deduplicate wallets by address, keeping the entry with most data
@@ -821,22 +830,27 @@ fn parse_cell_u32(cells: &[scraper::ElementRef], idx: usize) -> Option<u32> {
 
 /// Check if a wallet passes filters
 fn passes_filters(w: &CandidateWallet) -> bool {
-    // Win rate must be >= 60%
-    if w.win_rate < MIN_WIN_RATE {
+    // PnL-positive wallets bypass win_rate requirement
+    let is_profitable = w.total_pnl > 0.0;
+
+    // Win rate must be >= 60%, UNLESS wallet has positive PnL
+    if w.win_rate < MIN_WIN_RATE && !is_profitable {
         debug!(
             wallet = %w.address,
             win_rate = w.win_rate,
-            "rejecting: low win rate"
+            total_pnl = w.total_pnl,
+            "rejecting: low win rate (no positive PnL to compensate)"
         );
         return false;
     }
 
-    // Must have at least 50 closed markets
-    if w.closed_markets < MIN_CLOSED_MARKETS {
+    // Must have at least 50 closed markets (relaxed for profitable wallets)
+    if w.closed_markets < MIN_CLOSED_MARKETS && !is_profitable {
         debug!(
             wallet = %w.address,
             closed_markets = w.closed_markets,
-            "rejecting: insufficient closed markets"
+            total_pnl = w.total_pnl,
+            "rejecting: insufficient closed markets (no positive PnL to compensate)"
         );
         return false;
     }
@@ -865,17 +879,29 @@ fn passes_filters(w: &CandidateWallet) -> bool {
         }
     }
 
-    // Must trade NO side at least 40% of the time (if data available)
+    // Must trade NO side at least 20% of the time (relaxed from 40% for profitable wallets)
     if let Some(no_ratio) = w.no_trade_ratio {
-        if no_ratio < MIN_NO_TRADE_RATIO {
+        let min_no_ratio = if is_profitable { 0.20 } else { MIN_NO_TRADE_RATIO };
+        if no_ratio < min_no_ratio {
             debug!(
                 wallet = %w.address,
                 no_trade_ratio = no_ratio,
+                min_required = min_no_ratio,
+                is_profitable = is_profitable,
                 "rejecting: insufficient NO trade ratio"
             );
             return false;
         }
     }
+
+    info!(
+        wallet = %w.address,
+        win_rate = w.win_rate,
+        total_pnl = w.total_pnl,
+        no_trade_ratio = ?w.no_trade_ratio,
+        is_profitable = is_profitable,
+        "wallet PASSED filters"
+    );
 
     true
 }
@@ -1074,6 +1100,7 @@ mod tests {
         closed_markets: u32,
         avg_hold: Option<f64>,
         drawdown: Option<f64>,
+        total_pnl: f64,
     ) -> CandidateWallet {
         CandidateWallet {
             address: "0x1234567890123456789012345678901234567890".to_string(),
@@ -1081,7 +1108,7 @@ mod tests {
             closed_markets,
             avg_hold_days: avg_hold,
             max_drawdown: drawdown,
-            total_pnl: 1000.0,
+            total_pnl,
             sharpe: Some(1.0),
             source: "test".to_string(),
             no_trade_ratio: None,
@@ -1091,56 +1118,80 @@ mod tests {
 
     #[test]
     fn test_passes_filters_good_wallet() {
-        let wallet = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        let wallet = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
         assert!(passes_filters(&wallet));
     }
 
     #[test]
     fn test_rejects_low_win_rate() {
-        let wallet = sample_wallet(0.45, 100, Some(5.0), Some(-0.15));
+        // Low win rate + negative PnL → rejected
+        let wallet = sample_wallet(0.45, 100, Some(5.0), Some(-0.15), -100.0);
         assert!(!passes_filters(&wallet));
+    }
+
+    #[test]
+    fn test_accepts_low_win_rate_with_positive_pnl() {
+        // Low win rate + positive PnL → accepted (profitable bypass)
+        let wallet = sample_wallet(0.45, 100, Some(5.0), Some(-0.15), 500.0);
+        assert!(passes_filters(&wallet));
     }
 
     #[test]
     fn test_rejects_insufficient_markets() {
-        let wallet = sample_wallet(0.65, 10, Some(5.0), Some(-0.15));
+        // Low markets + negative PnL → rejected
+        let wallet = sample_wallet(0.65, 10, Some(5.0), Some(-0.15), -100.0);
         assert!(!passes_filters(&wallet));
     }
 
     #[test]
+    fn test_accepts_low_markets_with_positive_pnl() {
+        // Low markets + positive PnL → accepted (profitable bypass)
+        let wallet = sample_wallet(0.65, 10, Some(5.0), Some(-0.15), 500.0);
+        assert!(passes_filters(&wallet));
+    }
+
+    #[test]
     fn test_rejects_long_hold() {
-        let wallet = sample_wallet(0.65, 100, Some(10.0), Some(-0.15));
+        let wallet = sample_wallet(0.65, 100, Some(10.0), Some(-0.15), 1000.0);
         assert!(!passes_filters(&wallet));
     }
 
     #[test]
     fn test_rejects_excessive_drawdown() {
-        let wallet = sample_wallet(0.65, 100, Some(5.0), Some(-0.40));
+        let wallet = sample_wallet(0.65, 100, Some(5.0), Some(-0.40), 1000.0);
         assert!(!passes_filters(&wallet));
     }
 
     #[test]
     fn test_boundary_conditions() {
-        // Exactly at minimum thresholds should pass
-        let boundary = sample_wallet(MIN_WIN_RATE, MIN_CLOSED_MARKETS, Some(MAX_AVG_HOLD_DAYS), Some(MIN_DRAWDOWN));
+        // Exactly at minimum thresholds + positive PnL should pass
+        let boundary = sample_wallet(MIN_WIN_RATE, MIN_CLOSED_MARKETS, Some(MAX_AVG_HOLD_DAYS), Some(MIN_DRAWDOWN), 100.0);
         assert!(passes_filters(&boundary));
 
-        // Just below minimums should fail
-        let below_wr = sample_wallet(MIN_WIN_RATE - 0.01, MIN_CLOSED_MARKETS, Some(MAX_AVG_HOLD_DAYS), Some(MIN_DRAWDOWN));
+        // Just below minimums + negative PnL should fail
+        let below_wr = sample_wallet(MIN_WIN_RATE - 0.01, MIN_CLOSED_MARKETS, Some(MAX_AVG_HOLD_DAYS), Some(MIN_DRAWDOWN), -100.0);
         assert!(!passes_filters(&below_wr));
     }
 
     #[test]
     fn test_rejects_low_no_trade_ratio() {
-        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
-        w.no_trade_ratio = Some(0.10); // only 10% NO trades
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
+        w.no_trade_ratio = Some(0.10); // only 10% NO trades (below 20% even for profitable)
         w.no_win_rate = None;
         assert!(!passes_filters(&w));
     }
 
     #[test]
+    fn test_accepts_low_no_trade_ratio_if_profitable() {
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
+        w.no_trade_ratio = Some(0.25); // 25% NO trades (above 20% for profitable wallets)
+        w.no_win_rate = None;
+        assert!(passes_filters(&w));
+    }
+
+    #[test]
     fn test_accepts_high_no_trade_ratio() {
-        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
         w.no_trade_ratio = Some(0.60);
         w.no_win_rate = Some(0.70);
         assert!(passes_filters(&w));
@@ -1157,7 +1208,7 @@ mod tests {
 
     #[test]
     fn test_compute_score_no_division_by_zero() {
-        let w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        let w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
         let score = compute_score(&w);
         assert!(score > 0.0 && score <= 1.0, "score={score}");
         
@@ -1169,7 +1220,7 @@ mod tests {
         assert!(score2 >= 0.0 && score2 <= 1.0, "score2={score2}");
         
         // wallet con closed_markets=0
-        let w3 = sample_wallet(0.60, 0, None, None);
+        let w3 = sample_wallet(0.60, 0, None, None, 0.0);
         let score3 = compute_score(&w3);
         assert!(score3 >= 0.0, "score3={score3}");
     }
@@ -1211,7 +1262,7 @@ mod tests {
 
     #[test]
     fn test_evaluate_wallet_with_no_side_metrics() {
-        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
         w.no_trade_ratio = Some(0.70);
         w.no_win_rate = Some(0.65);
         
@@ -1222,7 +1273,7 @@ mod tests {
 
     #[test]
     fn test_evaluate_wallet_rejects_low_no_trade_ratio() {
-        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
         w.no_trade_ratio = Some(0.20);
         w.no_win_rate = Some(0.65);
         
@@ -1233,7 +1284,7 @@ mod tests {
 
     #[test]
     fn test_evaluate_wallet_rejects_low_no_win_rate() {
-        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
         w.no_trade_ratio = Some(0.70);
         w.no_win_rate = Some(0.40);
         
@@ -1244,7 +1295,7 @@ mod tests {
 
     #[test]
     fn test_evaluate_wallet_unknown_no_trade_ratio() {
-        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
         w.no_trade_ratio = None;
         w.no_win_rate = None;
         
@@ -1329,7 +1380,7 @@ mod tests {
 
     #[test]
     fn test_compute_score_with_no_metrics() {
-        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15));
+        let mut w = sample_wallet(0.65, 100, Some(5.0), Some(-0.15), 1000.0);
         w.no_trade_ratio = None;
         w.no_win_rate = None;
         
