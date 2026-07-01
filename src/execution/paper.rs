@@ -65,12 +65,14 @@ impl PaperBackend {
         asks: &[BookLevel],
         limit_price: f64,
         max_shares: f64,
+        slippage_tolerance: f64,
     ) -> (f64, f64) {
         let mut remaining = max_shares;
         let mut filled = 0.0;
         let mut cost = 0.0;
+        let max_acceptable_price = limit_price * (1.0 + slippage_tolerance);
         for level in asks {
-            if level.price > limit_price {
+            if level.price > max_acceptable_price {
                 break;
             }
             let take = remaining.min(level.size);
@@ -221,7 +223,7 @@ impl super::ExecutionBackend for PaperBackend {
             .context("no orderbook snapshot for token")?;
 
         let (filled, avg_price) = if req.side == Side::No {
-            Self::walk_book(&book.asks, req.limit_price, req.size_shares)
+            Self::walk_book(&book.asks, req.limit_price, req.size_shares, self.config.slippage_tolerance)
         } else {
             Self::walk_book(
                 &book
@@ -234,6 +236,7 @@ impl super::ExecutionBackend for PaperBackend {
                     .collect::<Vec<_>>(),
                 req.limit_price,
                 req.size_shares,
+                self.config.slippage_tolerance,
             )
         };
 
@@ -420,6 +423,7 @@ mod tests {
                 take_profit_price: 0.99,
                 stop_loss_price: None,
                 stop_loss_fraction: 0.20,
+                slippage_tolerance: 0.05,
             },
             10_000.0,
             cache,
@@ -450,6 +454,7 @@ mod tests {
             take_profit_price: 0.99,
             stop_loss_price: None,
             stop_loss_fraction: 0.20,
+            slippage_tolerance: 0.05,
         }
     }
 

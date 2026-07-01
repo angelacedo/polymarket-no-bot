@@ -46,6 +46,14 @@ pub struct ExecutionConfig {
     /// Example: 0.20 means close if position loses 20% from entry price.
     #[serde(default = "default_stop_loss_fraction")]
     pub stop_loss_fraction: f64,
+    /// Slippage tolerance for paper fills: accept prices up to this fraction above limit_price.
+    /// Example: 0.05 means accept prices up to 5% above limit_price.
+    #[serde(default = "default_slippage_tolerance")]
+    pub slippage_tolerance: f64,
+}
+
+fn default_slippage_tolerance() -> f64 {
+    0.05
 }
 
 fn default_take_profit_price() -> f64 {

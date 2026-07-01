@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -24,6 +24,7 @@ pub struct CopyTradeMonitor {
     last_wallet_db_refresh: Option<Instant>,
     last_wallet_evaluation: Option<Instant>,
     db_wallets: Vec<WalletRecord>,
+    wallet_cursors: HashMap<String, DateTime<Utc>>,
 }
 
 impl CopyTradeMonitor {
@@ -39,6 +40,7 @@ impl CopyTradeMonitor {
             last_wallet_db_refresh: None,
             last_wallet_evaluation: None,
             db_wallets: Vec::new(),
+            wallet_cursors: HashMap::new(),
         }
     }
 
@@ -323,10 +325,45 @@ impl CopyTradeMonitor {
             }
         };
 
-        trades
+        // Get cursor for this wallet (last processed timestamp)
+        let cursor = self.wallet_cursors.get(&wallet.address).copied();
+
+        let mut max_timestamp = cursor.unwrap_or_else(|| Utc::now() - chrono::Duration::hours(1));
+        let mut new_trades_count = 0;
+
+        let signals: Vec<TradeSignal> = trades
             .into_iter()
-            .filter_map(|t| self.process_trade(t, wallet))
-            .collect()
+            .filter(|t| {
+                // Only process trades newer than cursor
+                if let Some(cursor_ts) = cursor {
+                    if t.timestamp <= cursor_ts {
+                        return false;
+                    }
+                }
+                true
+            })
+            .filter_map(|t| {
+                if t.timestamp > max_timestamp {
+                    max_timestamp = t.timestamp;
+                }
+                new_trades_count += 1;
+                self.process_trade(t, wallet)
+            })
+            .collect();
+
+        // Update cursor to latest processed timestamp
+        if new_trades_count > 0 {
+            self.wallet_cursors.insert(wallet.address.clone(), max_timestamp);
+            debug!(
+                wallet = %wallet.address,
+                cursor = %max_timestamp,
+                new_trades = new_trades_count,
+                signals = signals.len(),
+                "updated wallet cursor"
+            );
+        }
+
+        signals
     }
 
     fn process_trade(
@@ -334,11 +371,13 @@ impl CopyTradeMonitor {
         trade: WalletTradeEvent,
         wallet: &WalletRecord,
     ) -> Option<TradeSignal> {
-        let dedup_key = format!("{}:{}:{}", trade.tx_hash, trade.asset_id, trade.timestamp);
+        // Use condition_id + timestamp + side for dedup (tx_hash may be unreliable)
+        let dedup_key = format!("{}:{}:{}:{}", wallet.address, trade.condition_id, trade.timestamp, trade.side as u8);
         if !self.seen.insert(dedup_key) {
-            info!(
+            debug!(
                 wallet = %wallet.address,
-                tx_hash = %trade.tx_hash,
+                condition_id = %trade.condition_id,
+                timestamp = %trade.timestamp,
                 "evaluating new trades for wallet={} passed_metrics=false (duplicate)",
                 wallet.address
             );
@@ -346,7 +385,7 @@ impl CopyTradeMonitor {
         }
 
         if trade.side != Side::No {
-            info!(
+            debug!(
                 wallet = %wallet.address,
                 side = ?trade.side,
                 "evaluating new trades for wallet={} passed_metrics=false (not NO side)",
@@ -357,7 +396,7 @@ impl CopyTradeMonitor {
 
         // Apply wallet-specific min_trade_size
         if trade.size_usd < wallet.min_trade_size_usd {
-            info!(
+            debug!(
                 wallet = %wallet.address,
                 size_usd = trade.size_usd,
                 min_required = wallet.min_trade_size_usd,
@@ -372,7 +411,7 @@ impl CopyTradeMonitor {
             .find(|m| m.no_token_id == trade.asset_id || m.condition_id == trade.condition_id);
 
         if market.is_none() {
-            info!(
+            debug!(
                 wallet = %wallet.address,
                 asset_id = %trade.asset_id,
                 "evaluating new trades for wallet={} passed_metrics=false (market not found)",
@@ -384,7 +423,7 @@ impl CopyTradeMonitor {
 
         // Check category filters
         if !self.wallet_allowed(wallet, &market.category) {
-            info!(
+            debug!(
                 wallet = %wallet.address,
                 category = %market.category,
                 "evaluating new trades for wallet={} passed_metrics=false (category blocked)",
@@ -395,7 +434,7 @@ impl CopyTradeMonitor {
 
         let no_ask = trade.price;
         if apply_filters(&self.config, market, no_ask, market.liquidity_usd).is_err() {
-            info!(
+            debug!(
                 wallet = %wallet.address,
                 price = no_ask,
                 liquidity = market.liquidity_usd,
